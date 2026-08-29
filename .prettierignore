@@ -1,0 +1,8 @@
+node_modules/
+dist/
+coverage/
+package-lock.json
+schema/
+test/fixtures/
+*.md
+*.tgz

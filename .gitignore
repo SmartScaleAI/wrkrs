@@ -1,0 +1,25 @@
+# Dependencies, build output, and coverage reports
+node_modules/
+dist/
+coverage/
+
+# npm tarballs and review archives
+*.tgz
+*.zip
+
+# Environment files
+.env
+.env.*
+
+# Temporary and editor files
+*.tmp
+*.log
+*.swp
+*~
+.DS_Store
+
+# Generated wrkrs installation output at the repository root
+# (fixtures under test/fixtures are committed intentionally)
+/.wrkrs/
+/.claude/agents/wrkrs-*.md
+/.claude/skills/wrkrs/

@@ -1,0 +1,58 @@
+{
+  "name": "wrkrs",
+  "version": "0.1.0",
+  "description": "Install a configurable AI development team into an existing Git repository and run it through Claude Code.",
+  "license": "MIT",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "wrkrs": "./dist/cli/index.js"
+  },
+  "files": [
+    "dist",
+    "schema",
+    "LICENSE",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=22.12"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/SmartScaleAI/wrkrs.git"
+  },
+  "homepage": "https://github.com/SmartScaleAI/wrkrs#readme",
+  "bugs": {
+    "url": "https://github.com/SmartScaleAI/wrkrs/issues"
+  },
+  "keywords": [
+    "cli",
+    "claude-code",
+    "ai-agents",
+    "developer-tools"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json && node scripts/copy-assets.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "coverage": "vitest run --coverage",
+    "schema:generate": "npm run build && node scripts/generate-schema.mjs",
+    "smoke": "npm run build && node scripts/smoke.mjs",
+    "verify": "npm run format:check && npm run typecheck && npm run coverage && npm run smoke"
+  },
+  "dependencies": {
+    "commander": "^15.0.0",
+    "yaml": "^2.9.0",
+    "zod": "^4.5.4"
+  },
+  "devDependencies": {
+    "@types/node": "^22.19.0",
+    "@vitest/coverage-v8": "^4.1.11",
+    "prettier": "^3.9.6",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.11"
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "fake-tracker": {
+      "command": "npx",
+      "args": ["-y", "fake-tracker-mcp"],
+      "env": {
+        "FAKE_TRACKER_TOKEN": "WRKRS_FIXTURE_SECRET_SENTINEL_9c2e1d"
+      }
+    },
+    "fake-remote": {
+      "type": "http",
+      "url": "https://example.invalid/mcp?token=WRKRS_FIXTURE_SECRET_SENTINEL_9c2e1d"
+    }
+  }
+}

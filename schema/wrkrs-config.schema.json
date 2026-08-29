@@ -1,0 +1,147 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "wrkrs configuration (schema version 1)",
+  "type": "object",
+  "properties": {
+    "schemaVersion": {
+      "type": "number",
+      "const": 1,
+      "description": "Configuration schema version."
+    },
+    "preset": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "const": "product-engineering",
+          "description": "Framework preset identifier."
+        },
+        "version": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991,
+          "description": "Preset version the roster was generated from."
+        }
+      },
+      "required": [
+        "id",
+        "version"
+      ],
+      "additionalProperties": false
+    },
+    "runtime": {
+      "type": "object",
+      "properties": {
+        "primary": {
+          "type": "string",
+          "const": "claude-code",
+          "description": "Primary runtime adapter identifier."
+        }
+      },
+      "required": [
+        "primary"
+      ],
+      "additionalProperties": false
+    },
+    "roster": {
+      "type": "object",
+      "properties": {
+        "primaryRole": {
+          "type": "string",
+          "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$",
+          "description": "Role that coordinates the others."
+        },
+        "roles": {
+          "minItems": 1,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$",
+                "description": "Role identifier referenced by the runtime adapter."
+              },
+              "source": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^(?!\\/)(?!\\.\\.(\\/|$))(?!.*\\/\\.\\.(\\/|$))[^\\\\]+$",
+                "description": "Repository-relative path of the portable role definition."
+              },
+              "specializations": {
+                "description": "Task-specific specializations attached to this role.",
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"
+                }
+              }
+            },
+            "required": [
+              "id",
+              "source"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "primaryRole",
+        "roles"
+      ],
+      "additionalProperties": false
+    },
+    "governance": {
+      "type": "object",
+      "properties": {
+        "requirePlanApproval": {
+          "type": "boolean"
+        },
+        "requireDesignApproval": {
+          "type": "boolean"
+        },
+        "requireOwnerTestForUserFacingOrNativeWork": {
+          "type": "boolean"
+        },
+        "requireExplicitReleaseApproval": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "requirePlanApproval",
+        "requireDesignApproval",
+        "requireOwnerTestForUserFacingOrNativeWork",
+        "requireExplicitReleaseApproval"
+      ],
+      "additionalProperties": false
+    },
+    "providers": {
+      "type": "object",
+      "propertyNames": {
+        "type": "string",
+        "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"
+      },
+      "additionalProperties": {},
+      "description": "Provider configuration keyed by provider identifier. Secrets are never stored here."
+    },
+    "extensions": {
+      "type": "object",
+      "propertyNames": {
+        "type": "string"
+      },
+      "additionalProperties": {},
+      "description": "Explicit extension data preserved by wrkrs but not interpreted by it."
+    }
+  },
+  "required": [
+    "schemaVersion",
+    "preset",
+    "runtime",
+    "roster",
+    "governance",
+    "providers",
+    "extensions"
+  ],
+  "additionalProperties": false,
+  "description": "wrkrs repository configuration"
+}

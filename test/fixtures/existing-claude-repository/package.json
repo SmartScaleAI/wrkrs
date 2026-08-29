@@ -1,0 +1,12 @@
+{
+  "name": "existing-claude-service",
+  "version": "2.3.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "express": "^5.1.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.0"
+  }
+}
