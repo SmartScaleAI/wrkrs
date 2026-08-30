@@ -439,6 +439,29 @@ Rationale:
 - A non-atomic copy would let another process observe a half-written generated file; failing closed keeps the "exact bytes or nothing" promise.
 - Directory fsync is what makes a renamed journal entry durable on filesystems such as ext4; without it the recovery record can vanish after a power loss.
 
+### A-018: Third review round: exclusive-write contract, removal durability, binding coordination, Windows fail-closed
+
+Status: Proposed  
+Date: 2026-08-30
+
+An independent review of commit 14c8c4c0890196741a86e7ad045c04bb5ef0e81a confirmed four remaining findings in the A-017 implementation: an exclusive write that failed after creating its entry left an untracked name, containment relied on POSIX working-directory semantics that Windows does not provide, removals were recorded before their directory entries were synced (and sync errors were swallowed), and the process-wide working directory was coordinated per filesystem instance. The corrections below were implemented on review/mvp-vertical-slice and are recorded for owner review; A-017 stands as history. Scope is unchanged.
+
+Decision:
+
+- Exclusive-write contract. `BoundDirectory.writeFileExclusive` distinguishes "nothing created" (`FileSystemError`, including EEXIST for an entry that belongs to someone else) from "created but incomplete" (`ExclusiveWriteError`, a new core error carrying the entry name). The transaction announces a staging name in the journal (`staging` status, a new journal operation state) before the exclusive write; a lock or journal temporary that was created but not completed is removed, proven absent, and synced, or else reported by exact path (a minimal recovery journal is written when the lock cannot be removed before a journal exists). Rollback removes a partial staging file only when its bytes are a prefix of the planned bytes, and never removes an EEXIST entry. `aborted` and `rolled-back` are never returned while an entry created by the failed operation may remain. A journal temporary is removed by bookkeeping cleanup only when this transaction recorded it as retained.
+- Removal durability ordering. Every transaction-critical removal proceeds as remove, verify absent, sync the containing directory, then persist the journal state that forgets the name or marks it reverted. Sync I/O errors are never swallowed: in rollback they produce `rollback-incomplete` naming the exact path as "not proven durable" (current absence is not accepted as proof); after an otherwise valid installation they produce `TRANSACTION_BOOKKEEPING_DURABILITY_UNPROVEN` and a `best-effort` result. Unsupported syncs downgrade to `best-effort` with `TRANSACTION_DURABILITY_BEST_EFFORT`, and `persistJournal` rewrites the journal once more when its serialized `durability` would otherwise not match. The applied result now carries `durability`.
+- Binding coordination. All Node filesystem instances share one module-global scheduler for `process.chdir`; an `AsyncLocalStorage` binding scope rejects a nested `withinDirectory` call synchronously with `CONTAINMENT_REENTRANT` before queuing; a `BoundDirectory` is callback-scoped (`BOUND_DIRECTORY_CLOSED` afterwards) and re-verifies the working-directory identity before each operation (`CONTAINMENT_LOST`); the binding walk is asynchronous so a segment that disappears or is replaced between inspection and entry produces a controlled `PATH_ANCESTOR_CHANGED`; raw chdir errors are never exposed; the previous working directory is always restored.
+- Platform support for this MVP. `FileSystemPort.containment` reports the capability explicitly. macOS and Linux use the POSIX binding (verified on macOS only). On Windows and in worker threads wrkrs fails closed before repository content is located or read: `init` (including `--dry-run`) returns `ENVIRONMENT_CONTAINMENT_UNSUPPORTED`, `check` reports it after environment and Git worktree detection, `applyPlan` aborts with it, and `--help`/`--version` still work. No pathname-precheck fallback exists. Full Windows contained I/O is deferred to the cross-platform increment; Windows is not claimed as supported or verified.
+- New stable codes: `ENVIRONMENT_CONTAINMENT_UNSUPPORTED`, `PRECONDITION_STAGING_NAME_TAKEN`, `TRANSACTION_BOOKKEEPING_DURABILITY_UNPROVEN`; new containment error codes `CONTAINMENT_UNSUPPORTED`, `CONTAINMENT_REENTRANT`, `CONTAINMENT_LOST`, `BOUND_DIRECTORY_CLOSED`; reader failure code `CONTAINMENT_UNAVAILABLE`. Journal schema change: operation status `staging` (transient bookkeeping; no migration).
+- Verification status. Verified on macOS with Node 22.23.2 and 24.18.1 only. Linux is expected to behave identically but is unverified; Windows is unsupported by design for this MVP. Crash recovery beyond the fault-injection tests has not been exercised.
+
+Rationale:
+
+- An O_EXCL create that later fails still owns a name; only a journal that knew the name in advance can reconcile it, and only a prefix comparison can prove a partial file is wrkrs's own.
+- A deletion is not durable until its directory entry is synced; recording "reverted" earlier would let a power loss resurrect the file behind a journal that claims otherwise.
+- The working directory is a process-wide resource, so its coordination must be process-wide, and a nested request must be refused rather than queued behind the caller that would never release it.
+- Failing closed on Windows is the only honest option without native `openat`-style primitives; the reviewer required stopping or failing closed rather than shipping an unverified invariant.
+
 ## Deferred decisions
 
 ### D-001: Exact provider authentication and capability mappings
@@ -484,4 +507,4 @@ Vertical slice approval: Approved by the owner on 2026-08-29
 Production dependency approval: Approved by the owner on 2026-08-29 (commander, zod, yaml)  
 Implementation repository selection: Approved by the owner on 2026-08-29 (github.com/SmartScaleAI/wrkrs, public, MIT)
 
-Implementation status: the first vertical slice was implemented on 2026-08-29, committed as a8e4a5ba567dc06a96868bf941b242a00e30df49 on review/mvp-vertical-slice, and pushed to origin for independent review; the remote's default branch main also points at that commit. The first review remediation (A-016) was committed as baab7195004463c06ff3bc0aa1b8b765eb34df0b on review/mvp-vertical-slice and pushed. The second review round (A-017) follows it on the same branch. No pull request, npm publication, deployment, merge, or release has occurred.
+Implementation status: the first vertical slice was implemented on 2026-08-29, committed as a8e4a5ba567dc06a96868bf941b242a00e30df49 on review/mvp-vertical-slice, and pushed to origin for independent review; the remote's default branch main also points at that commit. The first review remediation (A-016) was committed as baab7195004463c06ff3bc0aa1b8b765eb34df0b on review/mvp-vertical-slice and pushed; the second (A-017) as 14c8c4c0890196741a86e7ad045c04bb5ef0e81a; the third (A-018) follows on the same branch. No pull request, npm publication, deployment, merge, or release has occurred.

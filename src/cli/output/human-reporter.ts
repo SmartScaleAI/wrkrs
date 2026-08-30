@@ -183,6 +183,9 @@ export function renderApplyResult(result: ApplyResult, style: Styler): string {
           ` (transaction ${result.transactionId || 'none'})`,
       )
       for (const path of result.appliedPaths) lines.push(`  created ${path}`)
+      if (result.durability !== 'strict') {
+        lines.push(`  ${style.yellow('durability')} ${result.durability}`)
+      }
       for (const diagnostic of result.diagnostics.filter((item) => item.severity === 'warning')) {
         lines.push(`  ${style.yellow('warning')} ${diagnostic.code}: ${diagnostic.message}`)
       }

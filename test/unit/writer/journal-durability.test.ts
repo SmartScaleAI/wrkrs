@@ -60,7 +60,10 @@ describe('journal durability', () => {
     const result = await applyPreparedInit(prepared, createTestDependencies(), ports)
     expect(result.status).toBe('applied')
     expect(sequence).not.toContain('direct-write')
+    // The lock is written and synced before the first journal write; only the
+    // journal replacements are examined here.
     const persists = sequence
+      .slice(sequence.indexOf('write-temp'))
       .join(' ')
       .split('write-temp')
       .filter((chunk) => chunk.trim() !== '')
@@ -105,10 +108,17 @@ describe('journal durability', () => {
     const root = repo()
     const before = hashTree(root)
     let failures = 0
+    let journalRenamed = false
     const fs = interceptFileSystem(createTestPorts().fs, {
       bound: {
+        rename: async (args, next) => {
+          const result = await next(...args)
+          if (args[1] === '.journal.json') journalRenamed = true
+          return result
+        },
         sync: async (args, next, directory) => {
-          if (directory.relativePath === '.wrkrs' && failures === 0) {
+          // Fail the sync that follows the first journal replacement.
+          if (directory.relativePath === '.wrkrs' && journalRenamed && failures === 0) {
             failures += 1
             throw new FileSystemError('EIO', '.wrkrs', 'injected directory sync failure')
           }

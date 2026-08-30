@@ -2,7 +2,7 @@ import type { TransactionJournal } from '../core/ownership.js'
 import { ContainmentError, FileSystemError, type FileSystemPort } from '../core/ports.js'
 import { sha256 } from '../platform/hash.js'
 import { baseName, parentDirectory } from '../platform/paths.js'
-import { withOperation } from './journal.js'
+import { withDurability, withOperation } from './journal.js'
 
 export interface RetainedPath {
   readonly path: string
@@ -10,8 +10,9 @@ export interface RetainedPath {
 }
 
 export interface RollbackOutcome {
+  /** Journal with every operation reconciled and durability downgrades applied. */
   readonly journal: TransactionJournal
-  /** Every exact path that still exists (or cannot be proven absent) after rollback. */
+  /** Every exact path that still exists, cannot be proven absent, or whose removal is not proven durable. */
   readonly retained: readonly RetainedPath[]
 }
 
@@ -26,30 +27,48 @@ function ancestorMissing(error: unknown): boolean {
   return error instanceof ContainmentError && error.code === 'PATH_ANCESTOR_MISSING'
 }
 
+function isPrefix(candidate: Uint8Array, full: Uint8Array): boolean {
+  if (candidate.byteLength > full.byteLength) return false
+  for (let index = 0; index < candidate.byteLength; index += 1) {
+    if (candidate[index] !== full[index]) return false
+  }
+  return true
+}
+
+const DURABILITY_UNPROVEN =
+  'removed, but the directory sync failed so the removal is not proven durable'
+
 /**
  * Reverses completed operations in reverse order and then verifies the
- * result. Every removal is performed inside the bound parent directory, so a
- * changed ancestor makes the removal fail closed instead of reaching outside
- * the repository. A file is deleted only when its current hash still equals
- * the hash wrkrs recorded before publication; anything else (external
- * content, a later modification, a non-regular file, an unbindable parent)
- * is retained and reported by exact path.
+ * result. Every removal is performed inside the bound parent directory and
+ * follows one order: remove the name, verify it is absent, sync the
+ * containing directory, and only then record the operation as reverted. A
+ * real sync failure is never swallowed: the path is retained as "durability
+ * unproven" and the transaction reports rollback-incomplete.
  *
- * The in-memory journal is authoritative: it records publication before any
- * attempt to persist that fact, and keeps the staging path until staging
- * cleanup is verified, so neither a journal write failure nor a cleanup
- * failure can hide a name wrkrs created.
+ * A file is deleted only when it is proven to be wrkrs's: its hash equals the
+ * recorded expected hash, or, for a staging entry whose exclusive write
+ * failed after creation, its bytes are a prefix of the planned bytes (a
+ * partial write of wrkrs's own data). Anything else — external content, a
+ * later modification, a non-regular file, an unbindable parent — is retained
+ * and reported by exact path.
+ *
+ * The in-memory journal is authoritative: it records a staging name before
+ * the exclusive write, publication before any fallible step, and keeps the
+ * staging path until its removal is proven, so no failure can hide a name
+ * wrkrs created.
  */
 export async function rollbackTransaction(input: {
   root: string
   fs: FileSystemPort
   journal: TransactionJournal
   persist: (journal: TransactionJournal) => Promise<TransactionJournal>
+  /** Planned bytes for a target path, used to recognize wrkrs's own partial staging writes. */
+  expectedBytes: (targetPath: string) => Uint8Array | null
 }): Promise<RollbackOutcome> {
   const { root, fs } = input
   let journal = input.journal
   const retained = new Map<string, string>()
-  const touchedDirectories = new Set<string>()
 
   const retain = (path: string, reason: string): void => {
     if (!retained.has(path)) retained.set(path, reason)
@@ -65,11 +84,15 @@ export async function rollbackTransaction(input: {
     }
   }
 
-  /** Deletes a regular file only when its content hash proves wrkrs wrote it unchanged. */
+  /**
+   * Deletes a regular file only when it is proven to be wrkrs's, then proves
+   * the removal (absence check, directory sync) before reporting 'removed'.
+   */
   const removeIfOurs = async (
     relativePath: string,
     expectedHash: string | null,
     what: string,
+    partialOf: Uint8Array | null,
   ): Promise<'removed' | 'absent' | 'retained'> => {
     const directory = parentDirectory(relativePath) ?? ''
     const name = baseName(relativePath)
@@ -81,12 +104,11 @@ export async function rollbackTransaction(input: {
           retain(relativePath, `${what} is now a ${stat.kind}; not removed`)
           return 'retained'
         }
-        if (expectedHash === null) {
-          retain(relativePath, `${what} has no recorded hash; not removed`)
-          return 'retained'
-        }
-        const currentHash = sha256(await bound.readFile(name))
-        if (currentHash !== expectedHash) {
+        const bytes = await bound.readFile(name)
+        const currentHash = sha256(bytes)
+        const complete = expectedHash !== null && currentHash === expectedHash
+        const partial = partialOf !== null && isPrefix(bytes, partialOf)
+        if (!complete && !partial) {
           retain(
             relativePath,
             `${what} differs from what wrkrs wrote; the external change is preserved`,
@@ -94,7 +116,18 @@ export async function rollbackTransaction(input: {
           return 'retained'
         }
         await bound.unlink(name)
-        touchedDirectories.add(directory)
+        if (await bound.lstat(name)) {
+          retain(relativePath, `${what} is still present after removal`)
+          return 'retained'
+        }
+        let sync
+        try {
+          sync = await bound.sync()
+        } catch {
+          retain(relativePath, DURABILITY_UNPROVEN)
+          return 'retained'
+        }
+        journal = withDurability(journal, sync)
         return 'removed'
       })
     } catch (error) {
@@ -112,47 +145,64 @@ export async function rollbackTransaction(input: {
     if (operation.kind === 'create-directory') {
       const directory = parentDirectory(operation.path) ?? ''
       const name = baseName(operation.path)
+      let outcome: 'reverted' | 'retained' = 'reverted'
+      let note = 'directory removed'
       try {
-        await fs.withinDirectory(root, directory, (bound) => bound.removeDirectory(name))
-        touchedDirectories.add(directory)
-        await save(
-          withOperation(journal, operation.path, { status: 'reverted', note: 'directory removed' }),
-        )
+        await fs.withinDirectory(root, directory, async (bound) => {
+          try {
+            await bound.removeDirectory(name)
+          } catch (error) {
+            if (!(error instanceof FileSystemError && error.code === 'ENOENT')) throw error
+            note = 'already absent'
+          }
+          if (await bound.lstat(name)) {
+            throw new FileSystemError('EEXIST', name, 'still present after removal')
+          }
+          let sync
+          try {
+            sync = await bound.sync()
+          } catch {
+            outcome = 'retained'
+            note = DURABILITY_UNPROVEN
+            retain(operation.path, DURABILITY_UNPROVEN)
+            return
+          }
+          journal = withDurability(journal, sync)
+        })
       } catch (error) {
-        if (
-          (error instanceof FileSystemError && error.code === 'ENOENT') ||
-          ancestorMissing(error)
-        ) {
-          await save(
-            withOperation(journal, operation.path, { status: 'reverted', note: 'already absent' }),
-          )
-          continue
+        if (ancestorMissing(error)) {
+          note = 'already absent'
+        } else {
+          outcome = 'retained'
+          note =
+            error instanceof FileSystemError && error.code === 'ENOTEMPTY'
+              ? 'directory is not empty; it contains entries wrkrs did not create or could not remove'
+              : describe(error)
+          retain(operation.path, note)
         }
-        const reason =
-          error instanceof FileSystemError && error.code === 'ENOTEMPTY'
-            ? 'directory is not empty; it contains entries wrkrs did not create or could not remove'
-            : describe(error)
-        retain(operation.path, reason)
-        await save(withOperation(journal, operation.path, { status: 'retained', note: reason }))
       }
+      await save(withOperation(journal, operation.path, { status: outcome, note }))
       continue
     }
 
     let clean = true
     if (operation.stagingPath) {
+      const partialOf = operation.status === 'staging' ? input.expectedBytes(operation.path) : null
       const result = await removeIfOurs(
         operation.stagingPath,
         operation.expectedHash,
         'staging file',
+        partialOf,
       )
       if (result === 'retained') clean = false
     }
     if (operation.status === 'published' || operation.status === 'applied') {
-      const result = await removeIfOurs(operation.path, operation.expectedHash, 'file')
+      const result = await removeIfOurs(operation.path, operation.expectedHash, 'file', null)
       if (result === 'retained') clean = false
     }
-    // A 'staged' operation never published its target (publication failed or
-    // was never attempted), so the target path is deliberately left alone.
+    // A 'staging' or 'staged' operation never published its target
+    // (publication failed or was never attempted), so the target path is
+    // deliberately left alone.
     const reason =
       retained.get(operation.path) ?? retained.get(operation.stagingPath ?? '') ?? 'retained'
     await save(
@@ -161,15 +211,6 @@ export async function rollbackTransaction(input: {
         note: clean ? (operation.note ?? 'restored') : reason,
       }),
     )
-  }
-
-  // Best-effort durability for the removals themselves.
-  for (const directory of touchedDirectories) {
-    try {
-      await fs.withinDirectory(root, directory, (bound) => bound.sync())
-    } catch {
-      // A failed sync cannot make a removed entry reappear; verification below is authoritative.
-    }
   }
 
   // Verification pass: every path this transaction may have created must be

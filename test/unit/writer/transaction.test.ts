@@ -90,14 +90,14 @@ describe('transactional apply', () => {
     expect(existsSync(path.join(root, '.wrkrs'))).toBe(false)
   })
 
-  it('refuses to run when another installation holds the lock', async () => {
+  it('refuses to run when another installation holds the lock and never removes that lock', async () => {
     const root = repo()
     const inner = createTestPorts().fs
     const fs = interceptFileSystem(inner, {
       bound: {
         writeFileExclusive: async (args, next) => {
           if (args[0] === '.lock') {
-            await next('.lock', new TextEncoder().encode('{"transactionId":"competitor"}\n'), 0o644)
+            await next('.lock', new TextEncoder().encode('{"transactionId":"competitor"}\n'), 0o600)
           }
           return next(...args)
         },
@@ -106,10 +106,18 @@ describe('transactional apply', () => {
     const ports = createTestPorts({ fs })
     const prepared = await prepare(root, ports)
     const result = await applyPreparedInit(prepared, createTestDependencies(), ports)
-    expect(result.status).toBe('aborted')
-    if (result.status === 'aborted') {
-      expect(result.conflicts.map((conflict) => conflict.code)).toEqual(['OWNERSHIP_LOCK_PRESENT'])
+    // The competitor's lock sits inside the .wrkrs directory this transaction
+    // created, so that directory cannot be removed: the honest result names it
+    // instead of claiming a clean abort, and the foreign lock is untouched.
+    expect(result.status).toBe('rollback-incomplete')
+    if (result.status === 'rollback-incomplete') {
+      expect(result.conflict?.code).toBe('OWNERSHIP_LOCK_PRESENT')
+      expect(result.retained.map((item) => item.path)).toEqual(['.wrkrs'])
     }
+    expect(readFileSync(path.join(root, '.wrkrs', '.lock'), 'utf8')).toBe(
+      '{"transactionId":"competitor"}\n',
+    )
+    expect(readTree(root).find((entry) => entry.path === '.wrkrs/.lock')?.mode).toBe(0o600)
     expect(
       readTree(root)
         .map((entry) => entry.path)

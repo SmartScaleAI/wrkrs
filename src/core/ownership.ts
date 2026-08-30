@@ -46,12 +46,13 @@ export type TransactionStatus =
   | 'rollback-incomplete'
 
 export type JournalOperationStatus =
-  'planned' | 'staged' | 'published' | 'applied' | 'reverted' | 'retained'
+  'planned' | 'staging' | 'staged' | 'published' | 'applied' | 'reverted' | 'retained'
 
 /**
  * Journal operation lifecycle for a created file:
- * planned -> staged (content written and synced at stagingPath, expectedHash recorded)
- *         -> published (target name created atomically; may still be unverified)
+ * planned -> staging (stagingPath announced before the exclusive write; the entry may exist)
+ *         -> staged (content written and synced at stagingPath, expectedHash recorded)
+ *         -> published (target name created atomically; stagingPath kept until its removal is proven)
  *         -> applied (target re-read and hash-verified)
  * and after a failure: reverted | retained. Directories go planned -> applied.
  */

@@ -157,6 +157,16 @@ export async function prepareInit(
   if (!gitVersion.ok) {
     return err(new WrkrsError('ENV_GIT_MISSING', gitVersion.error.message))
   }
+  if (!ports.fs.containment.supported) {
+    // Fail closed before any repository content is located or scanned.
+    return err(
+      new WrkrsError(
+        'ENVIRONMENT_CONTAINMENT_UNSUPPORTED',
+        `Strict repository containment is not available here: ${ports.fs.containment.reason}. Nothing in the repository was read or written; run wrkrs on macOS or Linux`,
+        { details: { platform: ports.environment.platform } },
+      ),
+    )
+  }
   const located = await locateRepository(cwd, ports)
   if (!located.ok) {
     return err(locateErrorToWrkrsError(located.error))

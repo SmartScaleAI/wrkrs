@@ -101,6 +101,7 @@ export function interceptFileSystem(
   interceptors: FileSystemInterceptors,
 ): FileSystemPort {
   return {
+    containment: inner.containment,
     lstat: (...args) =>
       interceptors.lstat ? interceptors.lstat(args, inner.lstat.bind(inner)) : inner.lstat(...args),
     realpath: (...args) =>

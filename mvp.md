@@ -399,4 +399,13 @@ Second review round regression tests (decisions.md A-017):
 | Containment bound to I/O: ancestor swapped between scanner reads, after preconditions, before publication, and before rollback; outside tree byte- and mode-identical; outputs redacted; fixtures still install | test/unit/writer/containment-race.test.ts, test/unit/repository/containment.test.ts |
 | Journal durability: temp bytes fsynced before rename, live journal replaced only by rename, directory synced after rename, sync failure before and after publication, best-effort reporting, no rolled-back without verification | test/unit/writer/journal-durability.test.ts, test/unit/writer/journal-failures.test.ts |
 
-Deliberately deferred, unchanged from the approved scope: update, uninstall, shared-file structural edits, providers, and cross-platform CI. Verified on macOS with Node 22.23.2 and 24.18.1; Linux and Windows remain unverified.
+Third review round regression tests (decisions.md A-018):
+
+| Finding | Where |
+| --- | --- |
+| Exclusive writes that fail after creation: partial staging cleaned up (both fixtures) or named exactly, lock and journal-temporary contracts, EEXIST entries preserved byte- and mode-for-mode, no rolled-back while a staging name exists | test/unit/writer/exclusive-write.test.ts |
+| Containment capability gate: unsupported blocks init --dry-run, apply, and check content reads with a stable sanitized diagnostic; --help and --version still work; supported platforms unchanged | test/unit/writer/containment-capability.test.ts |
+| Removal durability ordering for staging cleanup, target and staging rollback, generated directories; EIO after rollback unlink and during bookkeeping cleanup; unsupported sync; serialized best-effort journal | test/unit/writer/removal-durability.test.ts |
+| Process-wide binding: nested call rejected promptly, cross-instance serialization, concurrent repositories isolated, closed BoundDirectory refused, working directory restored, segment disappearing or changing during binding | test/unit/platform/binding.test.ts |
+
+Deliberately deferred, unchanged from the approved scope: update, uninstall, shared-file structural edits, providers, and cross-platform CI. Verified on macOS with Node 22.23.2 and 24.18.1. Linux is unverified; Windows fails closed by design in this MVP and is not supported until the cross-platform increment.

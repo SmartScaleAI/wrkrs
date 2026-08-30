@@ -8,7 +8,9 @@ import {
   type TransactionStatus,
 } from '../core/ownership.js'
 import {
+  ExclusiveWriteError,
   FileSystemError,
+  type BoundDirectory,
   type ClockPort,
   type DirectorySyncResult,
   type FileSystemPort,
@@ -18,6 +20,23 @@ import { baseName } from '../platform/paths.js'
 
 export const JOURNAL_FILE_MODE = 0o644
 export const JOURNAL_FILE_NAME = baseName(JOURNAL_PATH)
+
+/**
+ * Raised when a journal temporary file was created but could not be removed
+ * (or its removal could not be proven durable). The live journal is
+ * untouched; the caller must report the exact retained path.
+ */
+export class JournalTempRetainedError extends Error {
+  readonly tempPath: string
+  readonly reason: string
+
+  constructor(tempPath: string, reason: string, cause: unknown) {
+    super(`journal temporary file retained: ${tempPath} (${reason})`, { cause })
+    this.name = 'JournalTempRetainedError'
+    this.tempPath = tempPath
+    this.reason = reason
+  }
+}
 
 export function createJournal(input: {
   transactionId: string
@@ -86,18 +105,50 @@ export function journalStagingName(transactionId: string): string {
 }
 
 /**
+ * Removes a journal temporary file that wrkrs created, proving it absent and
+ * syncing the directory; throws JournalTempRetainedError when that cannot be
+ * proven so the exact path is reported.
+ */
+async function removeTemp(
+  directory: BoundDirectory,
+  tempName: string,
+  cause: unknown,
+): Promise<DirectorySyncResult> {
+  const tempPath = `${WRKRS_DIRECTORY}/${tempName}`
+  try {
+    await directory.unlink(tempName)
+  } catch (error) {
+    if (!(error instanceof FileSystemError && error.code === 'ENOENT')) {
+      throw new JournalTempRetainedError(tempPath, 'could not be removed', cause)
+    }
+  }
+  if (await directory.lstat(tempName)) {
+    throw new JournalTempRetainedError(tempPath, 'still present after removal', cause)
+  }
+  try {
+    return await directory.sync()
+  } catch {
+    throw new JournalTempRetainedError(tempPath, 'removal is not proven durable', cause)
+  }
+}
+
+/**
  * Durable journal replacement inside the bound .wrkrs directory:
  *
  * 1. the new version is written to a temporary sibling with O_EXCL and its
- *    bytes are fsynced;
+ *    bytes are fsynced; an existing entry under that name belongs to someone
+ *    else and is never deleted;
  * 2. the temporary file is renamed over the live journal, so the previous
  *    record stays intact until the rename succeeds and the live journal is
  *    never truncated or rewritten in place;
  * 3. the directory is fsynced so the new entry survives a power loss on
- *    filesystems that require it.
+ *    filesystems that require it; a sync I/O error propagates.
  *
- * Where the platform cannot fsync a directory the journal records
- * durability "best-effort" instead of claiming strict durability.
+ * A temporary file whose write failed after creation is removed, proven
+ * absent, and synced before the original error propagates; if that cannot be
+ * proven a JournalTempRetainedError names it. When the directory sync reports
+ * unsupported, the journal is written once more with durability
+ * "best-effort" so the serialized value matches the effective guarantee.
  */
 export async function persistJournal(
   fs: FileSystemPort,
@@ -108,22 +159,33 @@ export async function persistJournal(
   const stamped: TransactionJournal = { ...journal, updatedAt: formatTimestamp(clock.now()) }
   const staging = journalStagingName(journal.transactionId)
   return fs.withinDirectory(root, WRKRS_DIRECTORY, async (directory) => {
-    const bytes = new TextEncoder().encode(serializeJournal(stamped))
-    try {
-      await directory.writeFileExclusive(staging, bytes, JOURNAL_FILE_MODE)
-    } catch (error) {
-      if (!(error instanceof FileSystemError && error.code === 'EEXIST')) throw error
-      // A previous attempt left its temporary file behind; replace it.
-      await directory.unlink(staging)
-      await directory.writeFileExclusive(staging, bytes, JOURNAL_FILE_MODE)
+    const writeOnce = async (document: TransactionJournal): Promise<DirectorySyncResult> => {
+      const bytes = new TextEncoder().encode(serializeJournal(document))
+      try {
+        await directory.writeFileExclusive(staging, bytes, JOURNAL_FILE_MODE)
+      } catch (error) {
+        if (error instanceof ExclusiveWriteError) {
+          await removeTemp(directory, staging, error)
+        }
+        throw error
+      }
+      try {
+        await directory.rename(staging, JOURNAL_FILE_NAME)
+      } catch (error) {
+        await removeTemp(directory, staging, error)
+        throw error
+      }
+      return directory.sync()
     }
-    try {
-      await directory.rename(staging, JOURNAL_FILE_NAME)
-    } catch (error) {
-      await directory.unlink(staging).catch(() => undefined)
-      throw error
+
+    let current = stamped
+    let sync = await writeOnce(current)
+    let result = withDurability(current, sync)
+    if (result.durability !== current.durability) {
+      current = result
+      sync = await writeOnce(current)
+      result = withDurability(current, sync)
     }
-    const sync = await directory.sync()
-    return withDurability(stamped, sync)
+    return result
   })
 }

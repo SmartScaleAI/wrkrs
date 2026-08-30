@@ -83,6 +83,23 @@ export async function runCheck(input: CheckInput, ports: CheckPorts): Promise<Ch
     }),
   )
 
+  if (!ports.fs.containment.supported) {
+    // Environment and worktree detection are complete; repository content is never read here.
+    diagnostics.push(
+      createDiagnostic(
+        'ENVIRONMENT_CONTAINMENT_UNSUPPORTED',
+        'error',
+        `Strict repository containment is not available here: ${ports.fs.containment.reason}`,
+        {
+          remediation:
+            'Run wrkrs check on macOS or Linux; configuration, manifest, and adapter files were not read',
+          details: { platform: ports.environment.platform },
+        },
+      ),
+    )
+    return finish(located.value.root, diagnostics)
+  }
+
   const context: CheckContext = {
     root: located.value.root,
     fs: ports.fs,

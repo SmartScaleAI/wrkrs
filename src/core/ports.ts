@@ -30,6 +30,26 @@ export class FileSystemError extends Error {
   }
 }
 
+/**
+ * Raised by an exclusive write that failed after the O_EXCL entry was created
+ * (write, sync, or close failed). `created` is always true: the caller must
+ * reconcile the named entry, which may hold partial content. Failures before
+ * creation (for example EEXIST) surface as FileSystemError instead, and the
+ * entry then belongs to someone else.
+ */
+export class ExclusiveWriteError extends Error {
+  readonly code: string
+  readonly entryName: string
+  readonly created = true as const
+
+  constructor(code: string, entryName: string, message: string) {
+    super(message)
+    this.name = 'ExclusiveWriteError'
+    this.code = code
+    this.entryName = entryName
+  }
+}
+
 export type ContainmentErrorCode =
   | 'PATH_ROOT_INVALID'
   | 'PATH_ANCESTOR_MISSING'
@@ -37,12 +57,19 @@ export type ContainmentErrorCode =
   | 'PATH_ANCESTOR_NOT_A_DIRECTORY'
   | 'PATH_ANCESTOR_CHANGED'
   | 'PATH_ENTRY_CHANGED'
+  | 'CONTAINMENT_UNSUPPORTED'
+  | 'CONTAINMENT_REENTRANT'
+  | 'CONTAINMENT_LOST'
+  | 'BOUND_DIRECTORY_CLOSED'
 
 /**
- * Raised when a directory cannot be bound without leaving the repository:
- * an ancestor is missing, is a symlink, is not a directory, or changed
- * identity between inspection and binding. Nothing is read or written when
- * this is thrown. Messages are controlled and never include file content.
+ * Raised when a directory cannot be bound without leaving the repository, or
+ * when the binding discipline is violated: an ancestor is missing, is a
+ * symlink, is not a directory, or changed identity between inspection and
+ * binding; the platform cannot bind at all; a bound operation was nested;
+ * the working directory no longer matches the bound directory; or a bound
+ * directory was used after its callback finished. Nothing is read or written
+ * when this is thrown. Messages are controlled and never include file content.
  */
 export class ContainmentError extends Error {
   readonly code: ContainmentErrorCode
@@ -85,10 +112,21 @@ export class AtomicPublicationUnsupportedError extends Error {
 export type DirectorySyncResult = 'synced' | 'unsupported'
 
 /**
+ * Whether the port can bind directories so that validation and I/O are one
+ * step. When unsupported, wrkrs must not read, create, modify, or remove
+ * repository content at all; the reason is a controlled, printable sentence.
+ */
+export type ContainmentCapability =
+  { readonly supported: true } | { readonly supported: false; readonly reason: string }
+
+/**
  * Operations on a directory that has been bound (its identity verified and
  * held) so that names resolve inside that directory regardless of later
  * changes to any ancestor. Names are single path segments; they never contain
  * separators, and the final segment is never followed when it is a symlink.
+ * A BoundDirectory is valid only inside the withinDirectory callback that
+ * produced it; every method re-verifies that the working directory still is
+ * the bound directory and fails closed otherwise.
  */
 export interface BoundDirectory {
   /** Repository-relative path of the bound directory ('' for the root). */
@@ -102,7 +140,12 @@ export interface BoundDirectory {
   readFile(name: string, maxBytes?: number): Promise<Uint8Array>
   /** Entries sorted by name. */
   readDirectory(): Promise<readonly DirectoryEntry[]>
-  /** Creates a new file (O_EXCL, no follow), writes all bytes, and syncs them. */
+  /**
+   * Creates a new file (O_EXCL, no follow), writes all bytes, and syncs them.
+   * Fails with FileSystemError (EEXIST and friends) when nothing was created
+   * and with ExclusiveWriteError when the entry exists but the write, sync, or
+   * close failed; the caller owns reconciling that entry.
+   */
   writeFileExclusive(name: string, data: Uint8Array, mode: number): Promise<void>
   /**
    * Atomically creates toName as a hard link of fromName. Fails with EEXIST
@@ -115,11 +158,17 @@ export interface BoundDirectory {
   rename(fromName: string, toName: string): Promise<void>
   makeDirectory(name: string, mode: number): Promise<void>
   removeDirectory(name: string): Promise<void>
-  /** Syncs this directory's entries; 'unsupported' where the platform cannot. */
+  /**
+   * Syncs this directory's entries to stable storage. Returns 'unsupported'
+   * when the platform cannot sync a directory; throws FileSystemError on a
+   * real I/O failure, which callers must never swallow.
+   */
   sync(): Promise<DirectorySyncResult>
 }
 
 export interface FileSystemPort {
+  /** Whether withinDirectory can bind directories on this platform and thread. */
+  readonly containment: ContainmentCapability
   /** lstat semantics: a symlink is reported as a symlink. Returns null when absent. */
   lstat(path: string): Promise<FileStat | null>
   /** Resolves symlinks; returns null when the path does not exist. */
@@ -127,7 +176,9 @@ export interface FileSystemPort {
   /**
    * Binds relativeDirectory beneath root (verifying every ancestor with lstat
    * and directory identity, refusing symlinks) and runs operation against it.
-   * Throws ContainmentError before any I/O when the directory cannot be bound.
+   * Throws ContainmentError before any I/O when the directory cannot be bound,
+   * when containment is unsupported, or when called from inside another
+   * withinDirectory callback.
    */
   withinDirectory<T>(
     root: string,

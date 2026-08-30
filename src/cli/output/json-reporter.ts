@@ -77,6 +77,7 @@ export function applyResultToJson(result: ApplyResult): Record<string, JsonValue
         transactionId: result.transactionId,
         appliedPaths: [...result.appliedPaths],
         createdDirectories: [...result.createdDirectories],
+        durability: result.durability,
         diagnostics: result.diagnostics.map((diagnostic) => ({
           ...diagnostic,
           details: { ...diagnostic.details },

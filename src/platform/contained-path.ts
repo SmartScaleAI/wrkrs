@@ -9,6 +9,7 @@ import { err, ok, type Result } from '../core/result.js'
 import { baseName, normalizeRelativePath, parentDirectory, toSystemPath } from './paths.js'
 
 export type ContainmentFailureCode =
+  | 'CONTAINMENT_UNAVAILABLE'
   | 'PATH_INVALID'
   | 'PATH_ANCESTOR_SYMLINK'
   | 'PATH_ANCESTOR_NOT_A_DIRECTORY'
@@ -92,6 +93,11 @@ function fromContainmentError(
       return err(failure('PATH_ENTRY_CHANGED', path, null, error.message))
     case 'PATH_ROOT_INVALID':
       return err(failure('PATH_ESCAPES_ROOT', path, null, error.message))
+    case 'CONTAINMENT_UNSUPPORTED':
+    case 'CONTAINMENT_REENTRANT':
+    case 'CONTAINMENT_LOST':
+    case 'BOUND_DIRECTORY_CLOSED':
+      return err(failure('CONTAINMENT_UNAVAILABLE', path, null, error.message))
   }
 }
 
