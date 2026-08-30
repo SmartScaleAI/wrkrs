@@ -80,6 +80,7 @@ export function serializeJournal(journal: TransactionJournal): string {
       kind: operation.kind,
       status: operation.status,
       stagingPath: operation.stagingPath,
+      expectedHash: operation.expectedHash,
       appliedHash: operation.appliedHash,
       note: operation.note,
     })),

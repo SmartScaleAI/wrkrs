@@ -85,8 +85,9 @@ export const manifestSchemaV1 = z.strictObject({
 export const journalOperationSchema = z.strictObject({
   path: relativePath,
   kind: z.enum(['create-file', 'create-directory']),
-  status: z.enum(['planned', 'staged', 'applied', 'reverted', 'retained']),
+  status: z.enum(['planned', 'staged', 'published', 'applied', 'reverted', 'retained']),
   stagingPath: relativePath.nullable(),
+  expectedHash: contentHash.nullable(),
   appliedHash: contentHash.nullable(),
   note: z.string().nullable(),
 })

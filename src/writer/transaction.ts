@@ -22,6 +22,7 @@ import { MANIFEST_SOURCE_ID } from '../planner/digest.js'
 import { GENERATED_DIRECTORY_MODE } from '../planner/operations.js'
 import {
   createJournal,
+  journalStagingPath,
   persistJournal,
   plannedOperation,
   withOperation,
@@ -56,12 +57,15 @@ export type ApplyResult =
       readonly status: 'rolled-back'
       readonly transactionId: string
       readonly failure: string
+      /** Stable conflict when the failure was a precondition (for example a target that appeared). */
+      readonly conflict: Conflict | null
       readonly diagnostics: readonly Diagnostic[]
     }
   | {
       readonly status: 'rollback-incomplete'
       readonly transactionId: string
       readonly failure: string
+      readonly conflict: Conflict | null
       readonly retained: readonly RetainedPath[]
       readonly journalPath: string
       readonly diagnostics: readonly Diagnostic[]
@@ -69,10 +73,15 @@ export type ApplyResult =
 
 class TransactionFailure extends Error {
   readonly diagnostics: readonly Diagnostic[]
-  constructor(message: string, diagnostics: readonly Diagnostic[] = []) {
+  readonly conflict: Conflict | null
+  constructor(
+    message: string,
+    options: { diagnostics?: readonly Diagnostic[]; conflict?: Conflict | null } = {},
+  ) {
     super(message)
     this.name = 'TransactionFailure'
-    this.diagnostics = diagnostics
+    this.diagnostics = options.diagnostics ?? []
+    this.conflict = options.conflict ?? null
   }
 }
 
@@ -91,19 +100,40 @@ function stagingPathFor(path: string, transactionId: string): string {
   return parent === null ? name : `${parent}/${name}`
 }
 
-async function safeUnlink(fs: FileSystemPort, systemPath: string): Promise<void> {
+async function safeUnlink(fs: FileSystemPort, systemPath: string): Promise<boolean> {
   try {
     await fs.unlink(systemPath)
+    return true
   } catch (error) {
-    if (error instanceof FileSystemError && error.code === 'ENOENT') return
-    throw error
+    if (error instanceof FileSystemError && error.code === 'ENOENT') return true
+    return false
   }
+}
+
+async function isAbsent(fs: FileSystemPort, systemPath: string): Promise<boolean> {
+  try {
+    return (await fs.lstat(systemPath)) === null
+  } catch {
+    return false
+  }
+}
+
+function describeFailure(error: unknown): string {
+  if (error instanceof TransactionFailure) return error.message
+  if (error instanceof FileSystemError) return `${error.code} at ${error.path}`
+  return error instanceof Error ? `${error.name}: ${error.message}` : String(error)
 }
 
 /**
  * Applies a validated, unblocked plan through a journaled transaction:
- * lock, recheck, staged writes in deterministic order, post-write hash
- * verification, validation, and reverse rollback on any failure.
+ * lock, recheck, staged writes in deterministic order, atomic no-replace
+ * publication, post-publication hash verification, validation, and
+ * hash-guarded reverse rollback on any failure.
+ *
+ * Journal state is advanced in memory before each attempt to persist it, so
+ * a persistence failure can never hide a published target from rollback, and
+ * every journal write replaces the file atomically so the previous record
+ * survives a failed write.
  */
 export async function applyPlan(input: ApplyInput, ports: WriterPorts): Promise<ApplyResult> {
   const { plan } = input
@@ -148,10 +178,11 @@ export async function applyPlan(input: ApplyInput, ports: WriterPorts): Promise<
 
   const transactionId = ids.uuid()
   const startedAt = formatTimestamp(clock.now())
+  const journalTempSystemPath = journalStagingPath(journalSystemPath, transactionId)
 
   // The lock lives inside .wrkrs, so that directory is the one piece of
   // bookkeeping that may exist before the lock is held. It is a planned
-  // created directory and is removed again on any abort or rollback.
+  // created directory and is removed again on any abort or complete rollback.
   let wrkrsCreated = false
   if (!(await fs.lstat(wrkrsSystemPath))) {
     if (!plan.createdDirectories.includes(WRKRS_DIRECTORY)) {
@@ -178,13 +209,31 @@ export async function applyPlan(input: ApplyInput, ports: WriterPorts): Promise<
             'PRECONDITION',
             'PRECONDITION_TARGET_CHANGED',
             WRKRS_DIRECTORY,
-            `Could not create .wrkrs: ${error instanceof Error ? error.message : String(error)}`,
+            `Could not create .wrkrs (${describeFailure(error)})`,
             'Run `wrkrs init --dry-run` again',
           ),
         ],
       }
     }
     wrkrsCreated = true
+  }
+
+  const releaseBookkeeping = async (): Promise<string[]> => {
+    const remaining: string[] = []
+    if (!(await safeUnlink(fs, journalTempSystemPath)))
+      remaining.push(`${JOURNAL_PATH} (temporary)`)
+    if (!(await safeUnlink(fs, journalSystemPath))) remaining.push(JOURNAL_PATH)
+    if (!(await safeUnlink(fs, lockSystemPath))) remaining.push(LOCK_PATH)
+    if (wrkrsCreated) {
+      try {
+        await fs.removeDirectory(wrkrsSystemPath)
+      } catch (error) {
+        if (!(error instanceof FileSystemError && error.code === 'ENOENT')) {
+          remaining.push(WRKRS_DIRECTORY)
+        }
+      }
+    }
+    return remaining
   }
 
   const lockContent = JSON.stringify(
@@ -225,7 +274,9 @@ export async function applyPlan(input: ApplyInput, ports: WriterPorts): Promise<
         listedDirectories.add(ancestor)
       }
     }
-    journalOperations.push(plannedOperation(operation.path, 'create-file'))
+    journalOperations.push(
+      plannedOperation(operation.path, 'create-file', 'planned', operation.proposedHash),
+    )
   }
 
   let journal: TransactionJournal = createJournal({
@@ -236,16 +287,21 @@ export async function applyPlan(input: ApplyInput, ports: WriterPorts): Promise<
   })
   const persist = (next: TransactionJournal) => persistJournal(fs, journalSystemPath, next, clock)
 
-  const releaseBookkeeping = async (): Promise<void> => {
-    await safeUnlink(fs, journalSystemPath)
-    await safeUnlink(fs, lockSystemPath)
-    if (wrkrsCreated) await fs.removeDirectory(wrkrsSystemPath).catch(() => undefined)
-  }
-
   try {
     journal = await persist(journal)
   } catch (error) {
-    await releaseBookkeeping()
+    const remaining = await releaseBookkeeping()
+    if (remaining.length > 0) {
+      return {
+        status: 'rollback-incomplete',
+        transactionId,
+        failure: `Could not write the transaction journal (${describeFailure(error)})`,
+        conflict: null,
+        retained: remaining.map((path) => ({ path, reason: 'bookkeeping could not be removed' })),
+        journalPath: JOURNAL_PATH,
+        diagnostics: [],
+      }
+    }
     return {
       status: 'aborted',
       conflicts: [
@@ -253,7 +309,7 @@ export async function applyPlan(input: ApplyInput, ports: WriterPorts): Promise<
           'PRECONDITION',
           'PRECONDITION_JOURNAL_UNWRITABLE',
           JOURNAL_PATH,
-          `Could not write the transaction journal: ${error instanceof Error ? error.message : String(error)}`,
+          `Could not write the transaction journal (${describeFailure(error)})`,
           'Check filesystem permissions and retry',
         ),
       ],
@@ -272,8 +328,15 @@ export async function applyPlan(input: ApplyInput, ports: WriterPorts): Promise<
   const createdDirectories: string[] = wrkrsCreated ? [WRKRS_DIRECTORY] : []
   const created = new Set(createdDirectories)
 
+  // Advances the in-memory journal first, then attempts to persist it. The
+  // in-memory record is what rollback reconciles against.
+  const advance = async (next: TransactionJournal): Promise<void> => {
+    journal = next
+    journal = await persist(journal)
+  }
+
   try {
-    journal = await persist(withStatus(journal, 'applying'))
+    await advance(withStatus(journal, 'applying'))
 
     for (const operation of creates) {
       for (const ancestor of ancestorDirectories(operation.path)) {
@@ -281,117 +344,144 @@ export async function applyPlan(input: ApplyInput, ports: WriterPorts): Promise<
         await fs.makeDirectory(toSystemPath(root, ancestor), GENERATED_DIRECTORY_MODE)
         created.add(ancestor)
         createdDirectories.push(ancestor)
-        journal = await persist(withOperation(journal, ancestor, { status: 'applied' }))
+        await advance(withOperation(journal, ancestor, { status: 'applied' }))
       }
 
       const bytes = operation.proposedBytes
       if (!bytes || operation.proposedHash === null || operation.mode === null) {
         throw new TransactionFailure(`Operation for ${operation.path} carries no content`)
       }
+      const expectedHash = operation.proposedHash
       const stagingPath = stagingPathFor(operation.path, transactionId)
       const stagingSystemPath = toSystemPath(root, stagingPath)
       const targetSystemPath = toSystemPath(root, operation.path)
 
+      // 1. Stage: full content written and synced under a temporary name.
       await fs.writeFileExclusive(stagingSystemPath, bytes, operation.mode)
-      journal = await persist(
-        withOperation(journal, operation.path, { status: 'staged', stagingPath }),
+      await advance(
+        withOperation(journal, operation.path, { status: 'staged', stagingPath, expectedHash }),
       )
 
-      if (await fs.lstat(targetSystemPath)) {
-        throw new TransactionFailure(`Precondition failed: ${operation.path} appeared during apply`)
+      // 2. Publish atomically without ever replacing an existing entry.
+      try {
+        await fs.publishFileExclusive(stagingSystemPath, targetSystemPath)
+      } catch (error) {
+        if (error instanceof FileSystemError && error.code === 'EEXIST') {
+          journal = withOperation(journal, operation.path, {
+            note: 'target appeared before publication; the existing entry was left untouched',
+          })
+          throw new TransactionFailure(
+            `Precondition failed: "${operation.path}" appeared before publication; the existing entry was left untouched`,
+            {
+              conflict: conflict(
+                'PRECONDITION',
+                'PRECONDITION_TARGET_APPEARED',
+                operation.path,
+                `"${operation.path}" was created by another process during apply; wrkrs did not overwrite it`,
+                'Review the file, then run `wrkrs init --dry-run` again',
+              ),
+            },
+          )
+        }
+        throw error
       }
-      await fs.rename(stagingSystemPath, targetSystemPath)
+      journal = withOperation(journal, operation.path, { status: 'published', stagingPath: null })
+      await advance(journal)
 
+      // 3. Verify the published bytes.
       const written = await fs.readFile(targetSystemPath)
       const appliedHash = sha256(written)
-      if (appliedHash !== operation.proposedHash) {
-        journal = await persist(
-          withOperation(journal, operation.path, {
-            status: 'applied',
-            stagingPath: null,
-            appliedHash,
-          }),
-        )
+      if (appliedHash !== expectedHash) {
         throw new TransactionFailure(
           `Post-write verification failed for ${operation.path}: content hash does not match the plan`,
         )
       }
       appliedPaths.push(operation.path)
-      journal = await persist(
-        withOperation(journal, operation.path, {
-          status: 'applied',
-          stagingPath: null,
-          appliedHash,
-        }),
-      )
+      journal = withOperation(journal, operation.path, { status: 'applied', appliedHash })
+      await advance(journal)
     }
 
-    journal = await persist(withStatus(journal, 'validating'))
-    const diagnostics = await input.validate({ transactionId })
+    await advance(withStatus(journal, 'validating'))
+    const diagnostics = [...(await input.validate({ transactionId }))]
     if (hasErrors(diagnostics)) {
       const summary = diagnostics
         .filter((diagnostic) => diagnostic.severity === 'error')
         .map((diagnostic) => `${diagnostic.code}${diagnostic.path ? ` (${diagnostic.path})` : ''}`)
         .join(', ')
-      throw new TransactionFailure(`Post-apply validation failed: ${summary}`, diagnostics)
+      throw new TransactionFailure(`Post-apply validation failed: ${summary}`, { diagnostics })
     }
 
-    journal = await persist(withStatus(journal, 'committed'))
-    await safeUnlink(fs, journalSystemPath)
-    await safeUnlink(fs, lockSystemPath)
+    await advance(withStatus(journal, 'committed'))
+    const leftovers = await releaseBookkeeping()
+    if (leftovers.length > 0) {
+      // The installation is complete; leftover bookkeeping is reported by check.
+      diagnostics.push(
+        ...leftovers.map((path) => ({
+          code: 'TRANSACTION_BOOKKEEPING_RETAINED',
+          severity: 'warning' as const,
+          message: `Transaction bookkeeping could not be removed: ${path}`,
+          path,
+          remediation: 'Remove the file manually',
+          details: {},
+        })),
+      )
+    }
     return { status: 'applied', transactionId, appliedPaths, createdDirectories, diagnostics }
   } catch (error) {
-    const failure = error instanceof Error ? error.message : String(error)
+    const failure = describeFailure(error)
     const diagnostics = error instanceof TransactionFailure ? error.diagnostics : []
+    const failureConflict = error instanceof TransactionFailure ? error.conflict : null
     try {
       journal = await persist(withStatus(journal, 'rolling-back', failure))
     } catch {
-      // Best effort; rollback proceeds from in-memory journal state.
+      journal = withStatus(journal, 'rolling-back', failure)
     }
+
     const outcome = await rollbackTransaction({ root, fs, journal, persist })
     journal = outcome.journal
+    const retained = new Map(outcome.retained.map((item) => [item.path, item.reason] as const))
 
-    if (outcome.retained.length === 0) {
+    if (retained.size === 0) {
       try {
-        await persist(withStatus(journal, 'rolled-back', failure))
+        journal = await persist(withStatus(journal, 'rolled-back', failure))
       } catch {
-        // The journal is removed next; a failed final write is not material.
+        journal = withStatus(journal, 'rolled-back', failure)
       }
-      await safeUnlink(fs, journalSystemPath)
-      await safeUnlink(fs, lockSystemPath)
-      if (wrkrsCreated) {
-        try {
-          await fs.removeDirectory(wrkrsSystemPath)
-        } catch (removeError) {
-          return {
-            status: 'rollback-incomplete',
-            transactionId,
-            failure,
-            retained: [
-              {
-                path: WRKRS_DIRECTORY,
-                reason: removeError instanceof Error ? removeError.message : String(removeError),
-              },
-            ],
-            journalPath: JOURNAL_PATH,
-            diagnostics,
-          }
+      const leftovers = await releaseBookkeeping()
+      for (const path of leftovers) retained.set(path, 'bookkeeping could not be removed')
+      // Final proof: every directory this transaction created must be gone.
+      for (const directory of [...createdDirectories].reverse()) {
+        if (retained.has(directory)) continue
+        if (!(await isAbsent(fs, toSystemPath(root, directory)))) {
+          retained.set(directory, 'directory still present after rollback')
         }
       }
-      return { status: 'rolled-back', transactionId, failure, diagnostics }
+      if (retained.size === 0) {
+        return {
+          status: 'rolled-back',
+          transactionId,
+          failure,
+          conflict: failureConflict,
+          diagnostics,
+        }
+      }
     }
 
     try {
       await persist(withStatus(journal, 'rollback-incomplete', failure))
     } catch {
-      // Retained paths are still reported to the user below.
+      // The retained paths are reported to the caller regardless.
     }
+    await safeUnlink(fs, journalTempSystemPath)
     await safeUnlink(fs, lockSystemPath)
     return {
       status: 'rollback-incomplete',
       transactionId,
       failure,
-      retained: outcome.retained,
+      conflict: failureConflict,
+      retained: [...retained.entries()]
+        .map(([path, reason]) => ({ path, reason }))
+        .sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0)),
       journalPath: JOURNAL_PATH,
       diagnostics,
     }

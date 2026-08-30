@@ -14,6 +14,7 @@ import { ANSI_PATTERN, runCompiledCli } from '../helpers/cli.js'
 import { CLAUDE_MD_SENTINEL, SECRET_SENTINEL } from '../helpers/sentinels.js'
 import {
   createFixtureRepository,
+  FIXTURES_ROOT,
   hashTree,
   makeTempDir,
   readTree,
@@ -258,5 +259,78 @@ describe('compiled CLI', () => {
     const human = await runCompiledCli(['check'], { cwd: root })
     expect(human.stdout).toContain('MANAGED_FILE_DRIFT')
     expect(human.stdout).toContain('.claude/agents/wrkrs-software-engineer.md')
+  })
+  it('blocks a symlinked .claude and never prints content from outside the repository', async () => {
+    const root = fixture('clean-repository')
+    const outside = makeTempDir('wrkrs-outside-')
+    cleanup.push(outside)
+    mkdirSync(path.join(outside, 'agents'), { recursive: true })
+    writeFileSync(
+      path.join(outside, 'agents', 'wrkrs-product-manager.md'),
+      '---\nname: OUTSIDE_S3NT1N3L_7d2f\n---\nOUTSIDE_S3NT1N3L_7d2f\n',
+    )
+    writeFileSync(
+      path.join(outside, 'settings.json'),
+      '{"permissions": {"allow": ["OUTSIDE_S3NT1N3L_7d2f"]}}\n',
+    )
+    symlinkSync(outside, path.join(root, '.claude'))
+    const before = hashTree(root)
+
+    const json = await runCompiledCli(['init', '--dry-run', '--json'], { cwd: root })
+    expect(json.code).toBe(1)
+    const parsed = JSON.parse(json.stdout) as {
+      result: { status: string }
+      plan: { blockers: { code: string }[]; findings: { code: string }[] }
+    }
+    expect(parsed.result.status).toBe('blocked')
+    expect(parsed.plan.blockers.map((blocker) => blocker.code)).toContain('PATH_ANCESTOR_SYMLINK')
+    expect(parsed.plan.findings.map((finding) => finding.code)).toContain('SCAN_PATH_UNSAFE')
+    const human = await runCompiledCli(['init', '--dry-run'], { cwd: root })
+    const check = await runCompiledCli(['check', '--json'], { cwd: root })
+    for (const output of [
+      json.stdout,
+      json.stderr,
+      human.stdout,
+      human.stderr,
+      check.stdout,
+      check.stderr,
+    ]) {
+      expect(output).not.toContain('OUTSIDE_S3NT1N3L')
+      expect(output).not.toContain('OUTSIDE_S3')
+    }
+    expect(hashTree(root)).toBe(before)
+  })
+
+  it('never echoes malformed document content in check or init output', async () => {
+    const root = fixture('clean-repository')
+    mkdirSync(path.join(root, '.wrkrs'))
+    for (const [name, target] of [
+      ['config.yaml', 'config.yaml'],
+      ['manifest.json', 'manifest.json'],
+      ['journal.json', '.journal.json'],
+    ] as const) {
+      writeFileSync(
+        path.join(root, '.wrkrs', target),
+        readFileSync(path.join(FIXTURES_ROOT, 'malformed-documents', name)),
+      )
+    }
+    const outputs = [
+      await runCompiledCli(['check'], { cwd: root }),
+      await runCompiledCli(['check', '--json'], { cwd: root }),
+      await runCompiledCli(['init', '--dry-run'], { cwd: root }),
+      await runCompiledCli(['init', '--dry-run', '--json'], { cwd: root }),
+    ]
+    for (const output of outputs) {
+      expect(output.code).toBe(1)
+      expect(output.stdout + output.stderr).not.toContain('ZQX')
+    }
+    const check = JSON.parse(outputs[1]!.stdout) as { diagnostics: { code: string }[] }
+    expect(check.diagnostics.map((diagnostic) => diagnostic.code)).toEqual(
+      expect.arrayContaining([
+        'CONFIG_PARSE_ERROR',
+        'MANIFEST_PARSE_ERROR',
+        'TRANSACTION_JOURNAL_UNREADABLE',
+      ]),
+    )
   })
 })

@@ -11,7 +11,7 @@ import {
 } from '../core/configuration.js'
 import { WrkrsError } from '../core/errors.js'
 import { sortFindings } from '../core/findings.js'
-import { CONFIG_PATH, SCHEMA_PATH } from '../core/ownership.js'
+import { CONFIG_PATH, MANIFEST_PATH, SCHEMA_PATH } from '../core/ownership.js'
 import type { DesiredComponent, InstallPlan } from '../core/plan.js'
 import type { ClockPort, EnvironmentPort, FileSystemPort, IdPort } from '../core/ports.js'
 import type { ProviderRegistry } from '../core/provider.js'
@@ -23,7 +23,7 @@ import { MINIMUM_NODE_VERSION, satisfiesMinimumVersion } from '../core/versions.
 import type { GitPort } from '../platform/git.js'
 import { buildInitPlan } from '../planner/init-plan.js'
 import { compilePortableRoles } from '../presets/product-engineering/index.js'
-import { analyzeRepository } from '../repository/analyze.js'
+import { analyzeRepository, snapshotTargets, type AnalyzeOptions } from '../repository/analyze.js'
 import { locateRepository, type LocatedRepository, type LocateError } from '../repository/locate.js'
 import { applyPlan, type ApplyResult } from '../writer/transaction.js'
 
@@ -40,6 +40,8 @@ export interface InitDependencies {
   readonly preset: RosterPreset
   readonly adapters: RuntimeAdapterRegistry
   readonly providers: ProviderRegistry
+  /** Scan bounds; tests lower them to exercise truncation behavior. */
+  readonly analyzeOptions?: AnalyzeOptions
 }
 
 export interface PreparedInit {
@@ -160,8 +162,8 @@ export async function prepareInit(
     return err(locateErrorToWrkrsError(located.error))
   }
   const repository = located.value
-  const snapshot = await analyzeRepository(repository, ports.fs)
-  const roster = recommendRoster(dependencies.preset, snapshot.projectSignals)
+  const scanned = await analyzeRepository(repository, ports.fs, dependencies.analyzeOptions ?? {})
+  const roster = recommendRoster(dependencies.preset, scanned.projectSignals)
   const config = buildConfig(roster)
 
   const adapter = dependencies.adapters.get(config.runtime.primary)
@@ -174,7 +176,7 @@ export async function prepareInit(
     )
   }
   const roles = compilePortableRoles(roster)
-  const analysis = adapter.analyze(snapshot)
+  const analysis = adapter.analyze(scanned)
   const desired: DesiredComponent[] = [
     ...compileCoreComponents(config, roles),
     ...adapter.compile({ roster, config, roles }),
@@ -186,6 +188,15 @@ export async function prepareInit(
       ...provider.planConfiguration({ config, providerConfig: config.providers[providerId] }),
     )
   }
+
+  // Every desired target (from the core, the runtime adapter, and any provider)
+  // is snapshotted exactly, independently of the bounded generic index.
+  const snapshot = await snapshotTargets(
+    scanned,
+    [...desired.map((component) => component.path), MANIFEST_PATH],
+    ports.fs,
+    dependencies.analyzeOptions ?? {},
+  )
 
   const plan = buildInitPlan({
     snapshot,

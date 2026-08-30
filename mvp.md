@@ -363,7 +363,7 @@ All four items were approved by the owner on 2026-08-29. The implementation repo
 
 ## First vertical slice implementation status
 
-Implemented on 2026-08-29 and left as uncommitted local changes for owner review.
+Implemented on 2026-08-29, committed as a8e4a5ba567dc06a96868bf941b242a00e30df49 on the review branch review/mvp-vertical-slice, and pushed for independent review. The review remediation recorded in decisions.md A-016 is held as local changes on that branch pending owner review.
 
 Acceptance test coverage:
 
@@ -379,5 +379,15 @@ Acceptance test coverage:
 | 38 | Verified locally on macOS with Node 22.23.2 and Node 24.18.1; Ubuntu and Windows runs are part of Increment 4 cross-platform CI | npm test on both runtimes |
 | 39 | Verified | test/unit/platform/paths.test.ts, test/unit/planner/init-plan.test.ts |
 | 40-41 | Verified | scripts/smoke.mjs via npm run smoke |
+
+Review remediation regression tests (decisions.md A-016):
+
+| Finding | Where |
+| --- | --- |
+| Atomic no-replace publication, including a target created immediately before publication | test/unit/writer/publication.test.ts |
+| Journal persistence failures before publication, after publication, after verification, during rollback, in both fixtures; exact retained-file reporting | test/unit/writer/journal-failures.test.ts |
+| Read containment for symlinked .wrkrs, .claude, role sources, and final paths, with proof that outside content is never read or printed | test/unit/repository/containment.test.ts, test/integration/cli.test.ts |
+| Sanitized parser diagnostics for malformed config, manifest, and journal documents across parse, check, dry-run, human, JSON, and unexpected-error paths | test/unit/config/redaction.test.ts, test/integration/cli.test.ts, test/fixtures/malformed-documents |
+| Exact targets under bounded scans: more than 5,000 earlier entries, more than 500 components, a namespaced target and a case-only collision past the boundary, an incomplete listing | test/unit/planner/bounded-scan.test.ts |
 
 Deliberately deferred, unchanged from the approved scope: update, uninstall, shared-file structural edits, providers, and cross-platform CI.

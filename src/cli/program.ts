@@ -83,8 +83,20 @@ export async function runCli(argv: readonly string[], options: RunCliOptions): P
       options.streams.stderr.write(`error ${error.code}: ${error.message}\n`)
       return error.exitCode
     }
-    const message = error instanceof Error ? (error.stack ?? error.message) : String(error)
-    options.streams.stderr.write(`error UNEXPECTED: ${message}\n`)
+    // Unexpected errors never echo their message: a parser or filesystem error
+    // could carry excerpts of repository content. Only the error class and the
+    // code frames (no message line) are shown, and frames only on request.
+    const name = error instanceof Error ? error.name : typeof error
+    const frames =
+      error instanceof Error && process.env['WRKRS_DEBUG'] && error.stack
+        ? error.stack
+            .split('\n')
+            .filter((line) => /^\s+at /.test(line))
+            .join('\n')
+        : ''
+    options.streams.stderr.write(
+      `error UNEXPECTED: ${name} (message withheld; set WRKRS_DEBUG=1 for stack frames)\n${frames ? frames + '\n' : ''}`,
+    )
     return EXIT_ERROR
   }
 }

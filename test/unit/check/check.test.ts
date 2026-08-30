@@ -128,6 +128,7 @@ describe('wrkrs check', () => {
             kind: 'create-file',
             status: 'retained',
             stagingPath: null,
+            expectedHash: null,
             appliedHash: null,
             note: 'x',
           },

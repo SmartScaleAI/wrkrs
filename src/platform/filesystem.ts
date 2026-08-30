@@ -1,4 +1,4 @@
-import { promises as fsp, type Dirent, type Stats } from 'node:fs'
+import { constants as fsConstants, promises as fsp, type Dirent, type Stats } from 'node:fs'
 
 import {
   FileSystemError,
@@ -25,6 +25,38 @@ function mapError(error: unknown, path: string): FileSystemError {
 function isMissing(error: unknown): boolean {
   const code = (error as NodeJS.ErrnoException)?.code
   return code === 'ENOENT' || code === 'ENOTDIR'
+}
+
+/** Error codes that mean the filesystem cannot create hard links, not that the target exists. */
+const LINK_UNSUPPORTED = new Set(['EPERM', 'ENOTSUP', 'EOPNOTSUPP', 'ENOSYS', 'EXDEV', 'EMLINK'])
+
+/**
+ * Atomic no-replace publication. A hard link creates the target name only if
+ * it does not already exist (link(2) fails with EEXIST for files, directories,
+ * and symlinks alike) and never replaces anything. When the filesystem cannot
+ * create hard links, copyFile with COPYFILE_EXCL is used: it also refuses to
+ * replace an existing target, at the cost of a non-atomic content copy that the
+ * caller's post-publication hash verification covers.
+ */
+async function publishFileExclusive(stagingPath: string, targetPath: string): Promise<void> {
+  try {
+    await fsp.link(stagingPath, targetPath)
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException)?.code
+    if (typeof code !== 'string' || !LINK_UNSUPPORTED.has(code)) {
+      throw mapError(error, targetPath)
+    }
+    try {
+      await fsp.copyFile(stagingPath, targetPath, fsConstants.COPYFILE_EXCL)
+    } catch (copyError) {
+      throw mapError(copyError, targetPath)
+    }
+  }
+  try {
+    await fsp.unlink(stagingPath)
+  } catch (error) {
+    if (!isMissing(error)) throw mapError(error, stagingPath)
+  }
 }
 
 async function writeWithFlag(
@@ -97,6 +129,8 @@ export function createNodeFileSystem(): FileSystemPort {
     writeFile(path, data, mode) {
       return writeWithFlag(path, data, mode, 'w')
     },
+
+    publishFileExclusive,
 
     async rename(from, to) {
       try {

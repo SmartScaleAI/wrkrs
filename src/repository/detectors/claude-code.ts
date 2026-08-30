@@ -13,7 +13,8 @@ export interface ClaudeDetection {
   readonly findings: readonly Finding[]
 }
 
-const MAX_COMPONENTS_PER_KIND = 500
+/** Per-kind bound on preserved components; presence beyond it is reported, not lost. */
+export const MAX_COMPONENTS_PER_KIND = 5000
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -30,28 +31,32 @@ export function frontmatterName(text: string): string | null {
   return match[1].replace(/^["']|["']$/g, '')
 }
 
+function emptySettings(path: string, valid: boolean): ClaudeSettingsSnapshot {
+  return {
+    path,
+    valid,
+    hookEvents: [],
+    hookCount: 0,
+    permissionRuleCounts: { allow: 0, deny: 0, ask: 0 },
+  }
+}
+
 async function readSettings(
   context: ScanContext,
   path: string,
 ): Promise<ClaudeSettingsSnapshot | null> {
+  const stat = await context.stat(path)
+  if (!stat) return null
+  if (stat.kind !== 'file') return emptySettings(path, false)
   const text = await context.readText(path)
-  if (text === null) return null
+  if (text === null) return emptySettings(path, false)
   let parsed: unknown = null
-  let valid = true
   try {
     parsed = JSON.parse(text)
   } catch {
-    valid = false
+    return emptySettings(path, false)
   }
-  if (!isRecord(parsed)) {
-    return {
-      path,
-      valid: false,
-      hookEvents: [],
-      hookCount: 0,
-      permissionRuleCounts: { allow: 0, deny: 0, ask: 0 },
-    }
-  }
+  if (!isRecord(parsed)) return emptySettings(path, false)
   const hookEvents: string[] = []
   let hookCount = 0
   const hooks = parsed['hooks']
@@ -78,7 +83,7 @@ async function readSettings(
   }
   return {
     path,
-    valid,
+    valid: true,
     hookEvents,
     hookCount,
     permissionRuleCounts: { allow: count('allow'), deny: count('deny'), ask: count('ask') },
@@ -86,8 +91,11 @@ async function readSettings(
 }
 
 async function readMcp(context: ScanContext, path: string): Promise<McpSnapshot | null> {
+  const stat = await context.stat(path)
+  if (!stat) return null
+  if (stat.kind !== 'file') return { path, valid: false, servers: [] }
   const text = await context.readText(path)
-  if (text === null) return null
+  if (text === null) return { path, valid: false, servers: [] }
   let parsed: unknown = null
   try {
     parsed = JSON.parse(text)
@@ -112,15 +120,24 @@ async function readMcp(context: ScanContext, path: string): Promise<McpSnapshot 
   return { path, valid: true, servers: result }
 }
 
+interface ComponentList {
+  readonly components: ClaudeComponentSnapshot[]
+  readonly truncated: boolean
+}
+
 async function listMarkdownComponents(
   context: ScanContext,
   directory: string,
   options: { nested: boolean; fileName?: string },
-): Promise<ClaudeComponentSnapshot[]> {
+): Promise<ComponentList> {
   const components: ClaudeComponentSnapshot[] = []
+  let truncated = false
   const entries = await context.listDirectory(directory)
   for (const entry of entries) {
-    if (components.length >= MAX_COMPONENTS_PER_KIND) break
+    if (components.length >= MAX_COMPONENTS_PER_KIND) {
+      truncated = true
+      break
+    }
     const relativePath = joinRelativePath(directory, entry.name)
     if (options.fileName) {
       if (entry.kind !== 'directory') continue
@@ -136,34 +153,36 @@ async function listMarkdownComponents(
       components.push({ path: relativePath, name: text === null ? null : frontmatterName(text) })
     } else if (entry.kind === 'directory' && options.nested) {
       const nested = await listMarkdownComponents(context, relativePath, { nested: false })
-      components.push(...nested)
+      components.push(...nested.components)
+      truncated = truncated || nested.truncated
     }
   }
-  return components
+  return { components, truncated }
 }
 
-async function listFiles(
-  context: ScanContext,
-  directory: string,
-): Promise<ClaudeComponentSnapshot[]> {
+async function listFiles(context: ScanContext, directory: string): Promise<ComponentList> {
   const entries = await context.listDirectory(directory)
-  return entries
-    .filter((entry) => entry.kind === 'file')
-    .slice(0, MAX_COMPONENTS_PER_KIND)
-    .map((entry) => ({ path: joinRelativePath(directory, entry.name), name: null }))
+  const files = entries.filter((entry) => entry.kind === 'file')
+  return {
+    components: files
+      .slice(0, MAX_COMPONENTS_PER_KIND)
+      .map((entry) => ({ path: joinRelativePath(directory, entry.name), name: null })),
+    truncated: files.length > MAX_COMPONENTS_PER_KIND,
+  }
 }
 
 /**
- * Detects existing Claude Code configuration without modifying anything.
- * Only presence, validity, component names, hook event names, permission
- * rule counts, and MCP server names/transports are recorded.
+ * Detects existing Claude Code configuration without modifying anything and
+ * without following symlinks. Only presence, validity, component names, hook
+ * event names, permission rule counts, and MCP server names/transports are
+ * recorded.
  */
 export async function detectClaudeCode(context: ScanContext): Promise<ClaudeDetection> {
   const findings: Finding[] = []
 
   const filePresent = async (path: string): Promise<string | null> => {
     const stat = await context.stat(path)
-    return stat && stat.kind === 'file' ? path : null
+    return stat && (stat.kind === 'file' || stat.kind === 'symlink') ? path : null
   }
 
   const claudeMd = await filePresent('CLAUDE.md')
@@ -213,20 +232,37 @@ export async function detectClaudeCode(context: ScanContext): Promise<ClaudeDete
         createFinding(
           'CLAUDE_SETTINGS_INVALID',
           'warning',
-          'Claude settings file is not valid JSON; it is preserved unchanged',
+          'Claude settings file is not valid JSON or could not be inspected; it is preserved unchanged',
           { path: snapshot.path },
         ),
       )
     }
   }
-  for (const agent of agents) {
+  for (const agent of agents.components) {
     present(agent.path, 'agent', agent.name ? [{ key: 'name', value: agent.name }] : [])
   }
-  for (const skill of skills) {
+  for (const skill of skills.components) {
     present(skill.path, 'skill', skill.name ? [{ key: 'name', value: skill.name }] : [])
   }
-  for (const command of commands) present(command.path, 'command')
-  for (const hook of hooks) present(hook.path, 'hook')
+  for (const command of commands.components) present(command.path, 'command')
+  for (const hook of hooks.components) present(hook.path, 'hook')
+  for (const [list, directory] of [
+    [agents, '.claude/agents'],
+    [skills, '.claude/skills'],
+    [commands, '.claude/commands'],
+    [hooks, '.claude/hooks'],
+  ] as const) {
+    if (list.truncated) {
+      findings.push(
+        createFinding(
+          'CLAUDE_COMPONENTS_TRUNCATED',
+          'warning',
+          `More than ${MAX_COMPONENTS_PER_KIND} components exist; only the first ${MAX_COMPONENTS_PER_KIND} are listed as preserved (all are preserved)`,
+          { path: directory },
+        ),
+      )
+    }
+  }
   if (mcp) {
     present(
       mcp.path,
@@ -238,7 +274,7 @@ export async function detectClaudeCode(context: ScanContext): Promise<ClaudeDete
         createFinding(
           'CLAUDE_MCP_INVALID',
           'warning',
-          '.mcp.json is not valid JSON; it is preserved unchanged',
+          '.mcp.json is not valid JSON or could not be inspected; it is preserved unchanged',
           { path: mcp.path },
         ),
       )
@@ -251,10 +287,10 @@ export async function detectClaudeCode(context: ScanContext): Promise<ClaudeDete
       claudeLocalMd,
       settings,
       settingsLocal,
-      agents,
-      skills,
-      commands,
-      hooks,
+      agents: agents.components,
+      skills: skills.components,
+      commands: commands.components,
+      hooks: hooks.components,
       mcp,
     },
     findings,

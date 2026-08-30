@@ -157,7 +157,7 @@ describe('transactional apply', () => {
     const root = repo()
     const before = hashTree(root)
     const fs = interceptFileSystem(createTestPorts().fs, {
-      rename: async (args, next) => {
+      publishFileExclusive: async (args, next) => {
         await next(...args)
         if (args[1].endsWith('schema.json')) appendFileSync(args[1], '/* corrupted */')
       },
@@ -165,10 +165,22 @@ describe('transactional apply', () => {
     const ports = createTestPorts({ fs })
     const prepared = await prepare(root, ports)
     const result = await applyPreparedInit(prepared, createTestDependencies(), ports)
-    expect(result.status).toBe('rolled-back')
-    if (result.status === 'rolled-back')
-      expect(result.failure).toContain('Post-write verification failed')
-    expect(hashTree(root)).toBe(before)
+    // The published bytes no longer match what wrkrs wrote, which is
+    // indistinguishable from an external edit: the file must be retained and
+    // reported, and everything else reverted.
+    expect(result.status).toBe('rollback-incomplete')
+    if (result.status !== 'rollback-incomplete') return
+    expect(result.failure).toContain('Post-write verification failed')
+    expect(result.retained.map((item) => item.path)).toContain('.wrkrs/schema.json')
+    expect(readFileSync(path.join(root, '.wrkrs', 'schema.json'), 'utf8')).toContain(
+      '/* corrupted */',
+    )
+    const remaining = readTree(root)
+      .filter((entry) => entry.kind === 'file')
+      .map((entry) => entry.path)
+      .filter((entry) => entry.startsWith('.wrkrs') || entry.startsWith('.claude'))
+    expect(remaining).toEqual(['.wrkrs/.journal.json', '.wrkrs/schema.json'])
+    expect(before).not.toBe(hashTree(root))
   })
 
   it('rolls back when post-apply validation reports an error', async () => {

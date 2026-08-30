@@ -719,18 +719,28 @@ Source layout as implemented, in addition to the recommended tree:
       adapters/registry.ts            explicit runtime adapter registry
       platform/environment.ts         Node version, PATH lookup for the optional Claude executable
       platform/package-info.ts        package version for --version and the manifest
+      platform/contained-path.ts      RepositoryReader: contained, symlink-refusing read boundary
       check/context.ts, check/checks/*.ts
     test/
-      helpers/                        temp Git repositories, tree hashing, fault-injecting filesystem, compiled CLI runner
+      helpers/                        temp Git repositories, tree hashing, fault-injecting filesystem, read recorder, compiled CLI runner
       setup/build.ts                  builds dist once so integration tests run the compiled CLI
+      fixtures/malformed-documents/   malformed config, manifest, and journal with short redaction sentinels
 
 Behavioral notes:
 
 - The dry run shows the exact manifest bytes that apply writes because the installation identifier and timestamps come from injectable ports at plan time; the plan digest excludes them.
-- Transaction bookkeeping lives in .wrkrs: .wrkrs/.lock is the exclusive lock and .wrkrs/.journal.json the journal. Create operations are staged as a sibling temporary file, renamed into place, re-read, and hash-verified. There are no file backups because the slice is create-only.
+- Transaction bookkeeping lives in .wrkrs: .wrkrs/.lock is the exclusive lock and .wrkrs/.journal.json the journal. There are no file backups because the slice is create-only.
 - init against a valid existing installation never writes: unchanged owned files are no-ops, customized seeded files are preserved, and any other difference blocks and points to the planned update command.
 - check reports managed drift as an error, seeded customization as information, and changes to referenced files as warnings. A blocked dry run exits with code 1.
 - Module boundaries and cycle freedom are enforced by a unit test over the import graph rather than a linter.
+
+Safety behavior confirmed by the 2026-08-29 review remediation (decisions.md A-016):
+
+- Atomic no-replace publication. A create operation is fully staged as a sibling temporary file and synced, then published through `FileSystemPort.publishFileExclusive`, which creates the target name with a hard link (falling back to `copyFile` with `COPYFILE_EXCL` only where hard links are unsupported) and fails with EEXIST when any entry exists at the target, whether file, directory, or symlink. A target that appears between planning and publication is never overwritten or removed; the transaction fails with `PRECONDITION_TARGET_APPEARED` naming the exact path and rolls everything else back.
+- Durable journal state and hash-guarded reconciliation. Every journal update is written to a temporary sibling and renamed over the journal, so a failed write never truncates the recovery record. Each file operation moves through planned, staged (staging path and expected hash recorded before publication), published, and applied; the in-memory journal advances before each persistence attempt so a journal failure cannot hide a published target. Rollback reconciles both staging and target paths against the recorded hashes, deletes only files whose current hash proves wrkrs wrote them unchanged, verifies that every created path is gone, and returns rolled-back only when that holds; otherwise it returns rollback-incomplete with every exact retained path (files, not only their parent directories) and keeps the journal.
+- Safe read containment. `platform/contained-path.ts` provides the RepositoryReader used by the scanner, `wrkrs check`, and Claude adapter validation: paths are normalized, every ancestor is inspected with lstat, symlinked ancestors are refused rather than followed, the real ancestor must remain inside the real repository root, and symlinked final paths are never read. Violations surface as the `SCAN_PATH_UNSAFE` finding and the `*_PATH_UNSAFE` diagnostics (config, role source, manifest, transaction, owned path, Claude component) without exposing external content.
+- Sanitized parser diagnostics. YAML and JSON parser messages are replaced by controlled codes (`YAML_<code>`, `JSON_SYNTAX_ERROR`) with line and column metadata only; schema violation messages are limited to expected-shape text and never echo unrecognized keys or values; unexpected CLI errors print only the error class (stack frames on request), so no output path can quote repository content.
+- Exact target handling under bounded scans. After desired-state compilation, `snapshotTargets` captures the exact lstat, hash, mode, symlink state, and ancestor state of every generated target, plus a listing of each existing parent directory, independently of the bounded generic index. The planner classifies only from those snapshots, proves case-folded collision safety from the listings (including an existing ancestor or target that is reachable only under a differently cased name), and blocks with `SCAN_INCOMPLETE` when a listing exceeds its bound instead of emitting a create it cannot prove safe.
 
 ## Current primary references
 

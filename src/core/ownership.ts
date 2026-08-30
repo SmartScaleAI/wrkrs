@@ -45,13 +45,23 @@ export type TransactionStatus =
   | 'rolled-back'
   | 'rollback-incomplete'
 
-export type JournalOperationStatus = 'planned' | 'staged' | 'applied' | 'reverted' | 'retained'
+export type JournalOperationStatus =
+  'planned' | 'staged' | 'published' | 'applied' | 'reverted' | 'retained'
 
+/**
+ * Journal operation lifecycle for a created file:
+ * planned -> staged (content written and synced at stagingPath, expectedHash recorded)
+ *         -> published (target name created atomically; may still be unverified)
+ *         -> applied (target re-read and hash-verified)
+ * and after a failure: reverted | retained. Directories go planned -> applied.
+ */
 export interface JournalOperation {
   readonly path: string
   readonly kind: 'create-file' | 'create-directory'
   readonly status: JournalOperationStatus
   readonly stagingPath: string | null
+  /** Hash the content must have; recorded before publication so recovery can reconcile. */
+  readonly expectedHash: string | null
   readonly appliedHash: string | null
   readonly note: string | null
 }

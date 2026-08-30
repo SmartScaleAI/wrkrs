@@ -42,6 +42,14 @@ export interface FileSystemPort {
   writeFileExclusive(path: string, data: Uint8Array, mode: number): Promise<void>
   /** Overwrites or creates a file. Used only for wrkrs transaction bookkeeping. */
   writeFile(path: string, data: Uint8Array, mode: number): Promise<void>
+  /**
+   * Publishes a fully written, synced staging file at targetPath without ever
+   * replacing an existing entry. Fails with EEXIST when any entry (file,
+   * directory, or symlink) exists at targetPath and leaves that entry and the
+   * staging file untouched. On success the staging path no longer exists.
+   */
+  publishFileExclusive(stagingPath: string, targetPath: string): Promise<void>
+  /** Renames a wrkrs-owned bookkeeping file, replacing the destination atomically. */
   rename(from: string, to: string): Promise<void>
   unlink(path: string): Promise<void>
   /** Creates one directory level; fails with EEXIST when it already exists. */

@@ -2,15 +2,18 @@ import { parseConfigDocument } from '../../config/load.js'
 import { createDiagnostic, type Diagnostic } from '../../core/diagnostics.js'
 import { parseFrontmatter } from '../../core/frontmatter.js'
 import { CONFIG_PATH } from '../../core/ownership.js'
-import { toSystemPath } from '../../platform/paths.js'
-import { readRepositoryText, type CheckContext } from '../context.js'
+import { containmentDiagnostic, type CheckContext } from '../context.js'
 
 const INIT_REMEDIATION = 'Run `wrkrs init` to install wrkrs into this repository'
 
 export async function checkConfig(context: CheckContext): Promise<Diagnostic[]> {
   const diagnostics: Diagnostic[] = []
-  const systemPath = toSystemPath(context.root, CONFIG_PATH)
-  const stat = await context.fs.lstat(systemPath)
+  const resolved = await context.reader.resolve(CONFIG_PATH)
+  if (!resolved.ok) {
+    diagnostics.push(containmentDiagnostic('CONFIG_PATH_UNSAFE', 'error', resolved.error))
+    return diagnostics
+  }
+  const stat = resolved.value.stat
   if (!stat) {
     diagnostics.push(
       createDiagnostic('CONFIG_MISSING', 'error', 'No .wrkrs/config.yaml was found', {
@@ -22,15 +25,25 @@ export async function checkConfig(context: CheckContext): Promise<Diagnostic[]> 
   }
   if (stat.kind !== 'file') {
     diagnostics.push(
-      createDiagnostic('CONFIG_NOT_A_FILE', 'error', `.wrkrs/config.yaml is a ${stat.kind}`, {
-        path: CONFIG_PATH,
-        remediation: 'Replace the path with a regular file',
-      }),
+      createDiagnostic(
+        stat.kind === 'symlink' ? 'CONFIG_PATH_UNSAFE' : 'CONFIG_NOT_A_FILE',
+        'error',
+        `.wrkrs/config.yaml is a ${stat.kind}; wrkrs did not read it`,
+        {
+          path: CONFIG_PATH,
+          remediation: 'Replace the path with a regular file',
+        },
+      ),
     )
     return diagnostics
   }
+  const text = await context.reader.readText(CONFIG_PATH)
+  if (!text.ok) {
+    diagnostics.push(containmentDiagnostic('CONFIG_PATH_UNSAFE', 'error', text.error))
+    return diagnostics
+  }
 
-  const parsed = parseConfigDocument(await readRepositoryText(context, systemPath))
+  const parsed = parseConfigDocument(text.value ?? '')
   if (!parsed.ok) {
     if (parsed.error.issues.length === 0) {
       diagnostics.push(
@@ -91,8 +104,16 @@ export async function checkConfig(context: CheckContext): Promise<Diagnostic[]> 
   }
 
   for (const role of config.roster.roles) {
-    const roleSystemPath = toSystemPath(context.root, role.source)
-    const roleStat = await context.fs.lstat(roleSystemPath)
+    const roleResolved = await context.reader.resolve(role.source)
+    if (!roleResolved.ok) {
+      diagnostics.push(
+        containmentDiagnostic('CONFIG_ROLE_SOURCE_UNSAFE', 'error', roleResolved.error, {
+          role: role.id,
+        }),
+      )
+      continue
+    }
+    const roleStat = roleResolved.value.stat
     if (!roleStat) {
       diagnostics.push(
         createDiagnostic(
@@ -112,9 +133,11 @@ export async function checkConfig(context: CheckContext): Promise<Diagnostic[]> 
     if (roleStat.kind !== 'file') {
       diagnostics.push(
         createDiagnostic(
-          'CONFIG_ROLE_SOURCE_NOT_A_FILE',
+          roleStat.kind === 'symlink'
+            ? 'CONFIG_ROLE_SOURCE_UNSAFE'
+            : 'CONFIG_ROLE_SOURCE_NOT_A_FILE',
           'error',
-          `Role "${role.id}" source is a ${roleStat.kind}`,
+          `Role "${role.id}" source is a ${roleStat.kind}; wrkrs did not read it`,
           {
             path: role.source,
             remediation: 'Replace the path with a regular Markdown file',
@@ -124,18 +147,27 @@ export async function checkConfig(context: CheckContext): Promise<Diagnostic[]> 
       )
       continue
     }
-    const frontmatter = parseFrontmatter(await readRepositoryText(context, roleSystemPath))
+    const roleText = await context.reader.readText(role.source)
+    if (!roleText.ok) {
+      diagnostics.push(
+        containmentDiagnostic('CONFIG_ROLE_SOURCE_UNSAFE', 'error', roleText.error, {
+          role: role.id,
+        }),
+      )
+      continue
+    }
+    const frontmatter = parseFrontmatter(roleText.value ?? '')
     const id = frontmatter?.fields.get('id') ?? ''
     if (id !== role.id) {
       diagnostics.push(
         createDiagnostic(
           'CONFIG_ROLE_SOURCE_ID_MISMATCH',
           'error',
-          `Role file declares id "${id}" but the roster expects "${role.id}"`,
+          `Role file does not declare the roster role id "${role.id}"`,
           {
             path: role.source,
             remediation: 'Set the frontmatter id to match the roster role id',
-            details: { role: role.id, actual: id },
+            details: { role: role.id },
           },
         ),
       )

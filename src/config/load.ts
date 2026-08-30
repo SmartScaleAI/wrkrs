@@ -13,6 +13,11 @@ import {
 } from './migrations/index.js'
 import { configSchemaV1, journalSchemaV1, manifestSchemaV1 } from './schema.js'
 
+/**
+ * Document issues and errors carry only controlled text. Parser messages are
+ * never forwarded because YAML and JSON parsers quote excerpts of the source,
+ * which may contain secrets; only line/column metadata survives.
+ */
 export interface DocumentIssue {
   readonly code: string
   readonly message: string
@@ -34,12 +39,56 @@ function formatLocation(path: readonly PropertyKey[]): string | null {
     .replace(/\.\[/g, '[')
 }
 
+/** Zod issue codes whose messages describe only the expected shape, never the received value. */
+const SAFE_ZOD_MESSAGE_CODES = new Set([
+  'invalid_type',
+  'invalid_value',
+  'too_small',
+  'too_big',
+  'invalid_format',
+  'not_multiple_of',
+])
+
+function sanitizeZodIssue(issue: z.core.$ZodIssue, code: string): DocumentIssue {
+  let message: string
+  if (issue.code === 'unrecognized_keys') {
+    const count = issue.keys.length
+    message = `${count} unrecognized key${count === 1 ? '' : 's'} present`
+  } else if (SAFE_ZOD_MESSAGE_CODES.has(issue.code)) {
+    message = issue.message
+  } else {
+    message = `Invalid value (${issue.code})`
+  }
+  return { code, message, location: formatLocation(issue.path) }
+}
+
 function zodIssues(error: z.ZodError, code: string): DocumentIssue[] {
-  return error.issues.map((issue) => ({
-    code,
-    message: issue.message,
-    location: formatLocation(issue.path),
-  }))
+  return error.issues.map((issue) => sanitizeZodIssue(issue, code))
+}
+
+function sanitizeYamlIssue(issue: YAML.YAMLError): DocumentIssue {
+  const position = issue.linePos?.[0]
+  const location = position
+    ? `line ${position.line}${position.col ? `, column ${position.col}` : ''}`
+    : null
+  return {
+    code: `YAML_${issue.code}`,
+    message: `YAML ${issue.name === 'YAMLWarning' ? 'warning' : 'syntax error'} (${issue.code})`,
+    location,
+  }
+}
+
+/** Keeps only positional metadata from a JSON.parse failure; the message text is discarded. */
+function sanitizeJsonError(error: unknown): DocumentIssue {
+  const raw = error instanceof Error ? error.message : ''
+  const lineColumn = /line (\d+) column (\d+)/.exec(raw)
+  const offset = /position (\d+)/.exec(raw)
+  const location = lineColumn
+    ? `line ${lineColumn[1]}, column ${lineColumn[2]}`
+    : offset
+      ? `offset ${offset[1]}`
+      : null
+  return { code: 'JSON_SYNTAX_ERROR', message: 'JSON syntax error', location }
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -78,11 +127,7 @@ export function parseConfigDocument(text: string): Result<WrkrsConfig, DocumentE
       code: 'CONFIG_PARSE_ERROR',
       message: 'config.yaml is not valid YAML',
       schemaVersion: null,
-      issues: document.errors.map((issue) => ({
-        code: 'YAML_' + issue.code,
-        message: issue.message,
-        location: issue.linePos ? `line ${issue.linePos[0]?.line ?? '?'}` : null,
-      })),
+      issues: document.errors.map(sanitizeYamlIssue),
     })
   }
   const value: unknown = document.toJS()
@@ -125,7 +170,11 @@ export function parseConfigDocument(text: string): Result<WrkrsConfig, DocumentE
   return ok(parsed.data)
 }
 
-/** Cross-field rules that JSON Schema cannot express. */
+/**
+ * Cross-field rules that JSON Schema cannot express. Identifiers echoed here
+ * have already passed the kebab-case identifier pattern, so they cannot carry
+ * arbitrary content.
+ */
 export function validateConfigSemantics(config: WrkrsConfig): DocumentIssue[] {
   const issues: DocumentIssue[] = []
   const seen = new Set<string>()
@@ -179,9 +228,9 @@ function parseJsonObject(
   } catch (error) {
     return err({
       code: `${prefix}_PARSE_ERROR`,
-      message: error instanceof Error ? error.message : 'invalid JSON',
+      message: 'document is not valid JSON',
       schemaVersion: null,
-      issues: [],
+      issues: [sanitizeJsonError(error)],
     })
   }
   if (!isPlainObject(value)) {
@@ -238,14 +287,14 @@ export function validateManifestSemantics(manifest: OwnershipManifest): Document
     if (!normalized.ok || normalized.value !== entry.path) {
       issues.push({
         code: 'MANIFEST_PATH_UNSAFE',
-        message: `entry path "${entry.path}" is not a normalized repository-relative path`,
+        message: 'entry path is not a normalized repository-relative path',
         location: `entries[${index}].path`,
       })
     }
     if (seen.has(entry.path)) {
       issues.push({
         code: 'MANIFEST_PATH_DUPLICATE',
-        message: `entry path "${entry.path}" is owned more than once`,
+        message: 'entry path is owned more than once',
         location: `entries[${index}].path`,
       })
     }
@@ -256,7 +305,7 @@ export function validateManifestSemantics(manifest: OwnershipManifest): Document
     if (!normalized.ok || normalized.value !== directory) {
       issues.push({
         code: 'MANIFEST_PATH_UNSAFE',
-        message: `created directory "${directory}" is not a normalized repository-relative path`,
+        message: 'created directory is not a normalized repository-relative path',
         location: `createdDirectories[${index}]`,
       })
     }

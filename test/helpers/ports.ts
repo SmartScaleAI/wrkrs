@@ -41,46 +41,47 @@ export function createTestDependencies(
   }
 }
 
-type Next<K extends keyof FileSystemPort> = FileSystemPort[K]
+type Method = keyof FileSystemPort
+type Interceptor<K extends Method> = (
+  args: Parameters<FileSystemPort[K]>,
+  next: FileSystemPort[K],
+) => ReturnType<FileSystemPort[K]>
 
-export interface FileSystemInterceptors {
-  writeFileExclusive?: (
-    args: Parameters<FileSystemPort['writeFileExclusive']>,
-    next: Next<'writeFileExclusive'>,
-  ) => Promise<void>
-  rename?: (args: Parameters<FileSystemPort['rename']>, next: Next<'rename'>) => Promise<void>
-  unlink?: (args: Parameters<FileSystemPort['unlink']>, next: Next<'unlink'>) => Promise<void>
-  makeDirectory?: (
-    args: Parameters<FileSystemPort['makeDirectory']>,
-    next: Next<'makeDirectory'>,
-  ) => Promise<void>
-}
+export type FileSystemInterceptors = { [K in Method]?: Interceptor<K> }
 
 /**
- * Fault-injection seam: wraps a real filesystem port so tests can fail or
- * tamper with specific operations while every other call hits the disk.
+ * Fault-injection seam: wraps a real filesystem port so tests can fail,
+ * delay, or tamper with specific operations while every other call hits the
+ * disk. Each interceptor receives the original arguments and the real method.
  */
 export function interceptFileSystem(
   inner: FileSystemPort,
   interceptors: FileSystemInterceptors,
 ): FileSystemPort {
-  return {
-    ...inner,
-    writeFileExclusive: (...args) =>
-      interceptors.writeFileExclusive
-        ? interceptors.writeFileExclusive(args, inner.writeFileExclusive.bind(inner))
-        : inner.writeFileExclusive(...args),
-    rename: (...args) =>
-      interceptors.rename
-        ? interceptors.rename(args, inner.rename.bind(inner))
-        : inner.rename(...args),
-    unlink: (...args) =>
-      interceptors.unlink
-        ? interceptors.unlink(args, inner.unlink.bind(inner))
-        : inner.unlink(...args),
-    makeDirectory: (...args) =>
-      interceptors.makeDirectory
-        ? interceptors.makeDirectory(args, inner.makeDirectory.bind(inner))
-        : inner.makeDirectory(...args),
+  const wrapped: Record<string, unknown> = {}
+  for (const method of Object.keys(inner) as Method[]) {
+    const original = inner[method] as (...args: unknown[]) => unknown
+    const interceptor = interceptors[method] as
+      ((args: unknown[], next: (...args: unknown[]) => unknown) => unknown) | undefined
+    wrapped[method] = interceptor
+      ? (...args: unknown[]) => interceptor(args, original.bind(inner))
+      : (...args: unknown[]) => original.apply(inner, args)
   }
+  return wrapped as unknown as FileSystemPort
+}
+
+/** Records every path passed to a read operation so tests can prove containment. */
+export function recordReads(inner: FileSystemPort): { fs: FileSystemPort; reads: string[] } {
+  const reads: string[] = []
+  const fs = interceptFileSystem(inner, {
+    readFile: (args, next) => {
+      reads.push(args[0])
+      return next(...args)
+    },
+    readDirectory: (args, next) => {
+      reads.push(args[0])
+      return next(...args)
+    },
+  })
+  return { fs, reads }
 }

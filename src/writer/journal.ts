@@ -5,7 +5,7 @@ import type {
   TransactionJournal,
   TransactionStatus,
 } from '../core/ownership.js'
-import type { ClockPort, FileSystemPort } from '../core/ports.js'
+import { FileSystemError, type ClockPort, type FileSystemPort } from '../core/ports.js'
 import { formatTimestamp } from '../platform/clock.js'
 
 export const JOURNAL_FILE_MODE = 0o644
@@ -33,8 +33,9 @@ export function plannedOperation(
   path: string,
   kind: JournalOperation['kind'],
   status: JournalOperationStatus = 'planned',
+  expectedHash: string | null = null,
 ): JournalOperation {
-  return { path, kind, status, stagingPath: null, appliedHash: null, note: null }
+  return { path, kind, status, stagingPath: null, expectedHash, appliedHash: null, note: null }
 }
 
 export function withStatus(
@@ -48,7 +49,9 @@ export function withStatus(
 export function withOperation(
   journal: TransactionJournal,
   path: string,
-  patch: Partial<Pick<JournalOperation, 'status' | 'stagingPath' | 'appliedHash' | 'note'>>,
+  patch: Partial<
+    Pick<JournalOperation, 'status' | 'stagingPath' | 'expectedHash' | 'appliedHash' | 'note'>
+  >,
 ): TransactionJournal {
   return {
     ...journal,
@@ -58,18 +61,39 @@ export function withOperation(
   }
 }
 
-/** Persists the journal; the caller decides whether a persistence failure is fatal. */
+/** Temporary file used while replacing the journal; never the recovery record itself. */
+export function journalStagingPath(journalSystemPath: string, transactionId: string): string {
+  return `${journalSystemPath}.${transactionId.slice(0, 8)}.tmp`
+}
+
+/**
+ * Durable journal replacement: the new version is written to a temporary
+ * sibling, synced, and renamed over the journal. The previous journal stays
+ * intact until the rename succeeds, so a failure at any point leaves a valid
+ * recovery record on disk.
+ */
 export async function persistJournal(
   fs: FileSystemPort,
-  systemPath: string,
+  journalSystemPath: string,
   journal: TransactionJournal,
   clock: ClockPort,
 ): Promise<TransactionJournal> {
   const stamped = { ...journal, updatedAt: formatTimestamp(clock.now()) }
-  await fs.writeFile(
-    systemPath,
-    new TextEncoder().encode(serializeJournal(stamped)),
-    JOURNAL_FILE_MODE,
-  )
+  const bytes = new TextEncoder().encode(serializeJournal(stamped))
+  const staging = journalStagingPath(journalSystemPath, journal.transactionId)
+  try {
+    await fs.writeFileExclusive(staging, bytes, JOURNAL_FILE_MODE)
+  } catch (error) {
+    if (!(error instanceof FileSystemError && error.code === 'EEXIST')) throw error
+    // A previous attempt left its temporary file behind; replace it.
+    await fs.unlink(staging)
+    await fs.writeFileExclusive(staging, bytes, JOURNAL_FILE_MODE)
+  }
+  try {
+    await fs.rename(staging, journalSystemPath)
+  } catch (error) {
+    await fs.unlink(staging).catch(() => undefined)
+    throw error
+  }
   return stamped
 }

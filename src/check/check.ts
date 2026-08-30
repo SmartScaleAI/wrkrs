@@ -8,6 +8,7 @@ import {
 } from '../core/diagnostics.js'
 import type { EnvironmentPort, FileSystemPort } from '../core/ports.js'
 import type { ProviderRegistry } from '../core/provider.js'
+import { createRepositoryReader } from '../platform/contained-path.js'
 import type { GitPort } from '../platform/git.js'
 import { locateRepository, type LocateError } from '../repository/locate.js'
 import { checkAdapter } from './checks/adapter.js'
@@ -85,6 +86,7 @@ export async function runCheck(input: CheckInput, ports: CheckPorts): Promise<Ch
   const context: CheckContext = {
     root: located.value.root,
     fs: ports.fs,
+    reader: await createRepositoryReader(located.value.root, ports.fs),
     environment: ports.environment,
     adapters: input.adapters,
     providers: input.providers,

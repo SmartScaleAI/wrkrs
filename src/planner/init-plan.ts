@@ -13,10 +13,16 @@ import type { Conflict, DesiredComponent, InstallPlan, PlanOperation } from '../
 import type { ClockPort, IdPort } from '../core/ports.js'
 import type { RosterRecommendation } from '../core/roster.js'
 import type { PreservedComponent } from '../core/runtime-adapter.js'
-import type { FileSnapshot, RepositorySnapshot } from '../core/snapshot.js'
-import { sha256 } from '../platform/hash.js'
-import { ancestorDirectories, caseFoldKey, normalizeRelativePath } from '../platform/paths.js'
+import type { FileSnapshot, RepositorySnapshot, TargetSnapshot } from '../core/snapshot.js'
 import { formatTimestamp } from '../platform/clock.js'
+import { sha256 } from '../platform/hash.js'
+import {
+  ancestorDirectories,
+  baseName,
+  caseFoldKey,
+  normalizeRelativePath,
+  parentDirectory,
+} from '../platform/paths.js'
 import { conflict, FUTURE_UPDATE_REMEDIATION, sortConflicts } from './conflicts.js'
 import { computePlanDigest, MANIFEST_SOURCE_ID } from './digest.js'
 import {
@@ -103,11 +109,12 @@ function globalConflicts(snapshot: RepositorySnapshot): Conflict[] {
   return conflicts
 }
 
-function ancestorConflict(path: string, files: ReadonlyMap<string, FileSnapshot>): Conflict | null {
-  for (const ancestor of ancestorDirectories(path)) {
-    const existing = files.get(ancestor)
-    if (!existing) continue
-    if (existing.kind === 'symlink') {
+function containmentConflict(path: string, target: TargetSnapshot): Conflict | null {
+  const ancestor = target.blockingAncestor ?? 'an ancestor'
+  switch (target.containment) {
+    case 'ok':
+      return null
+    case 'ancestor-symlink':
       return conflict(
         'PATH',
         'PATH_ANCESTOR_SYMLINK',
@@ -115,18 +122,31 @@ function ancestorConflict(path: string, files: ReadonlyMap<string, FileSnapshot>
         `Parent directory "${ancestor}" is a symlink; wrkrs does not write through symlinks`,
         'Replace the symlink with a real directory or move it aside',
       )
-    }
-    if (existing.kind !== 'directory') {
+    case 'ancestor-not-directory':
       return conflict(
         'PATH',
         'PATH_ANCESTOR_NOT_A_DIRECTORY',
         path,
-        `Parent path "${ancestor}" exists and is a ${existing.kind}`,
+        `Parent path "${ancestor}" exists and is not a directory`,
         'Move the conflicting path aside before running wrkrs init',
       )
-    }
+    case 'escapes-root':
+      return conflict(
+        'PATH',
+        'PATH_ESCAPES_ROOT',
+        path,
+        `Parent directory "${ancestor}" resolves outside the repository root`,
+        'Replace the escaping directory with a real directory inside the repository',
+      )
+    case 'invalid-path':
+      return conflict(
+        'PATH',
+        'PATH_NOT_NORMALIZED',
+        path,
+        'Planned path is not a valid repository-relative path',
+        'This is an internal planning error; report it with the plan digest',
+      )
   }
-  return null
 }
 
 function classifyDesired(
@@ -158,10 +178,24 @@ function classifyDesired(
       ),
     )
   }
-  const existing = snapshot.files.get(component.path)
-  const ancestor = ancestorConflict(component.path, snapshot.files)
-  if (ancestor) return blockedOperation(source, existing, ancestor)
+  const target = snapshot.targets.get(component.path)
+  if (!target) {
+    return blockedOperation(
+      source,
+      undefined,
+      conflict(
+        'PRECONDITION',
+        'SCAN_TARGET_UNVERIFIED',
+        component.path,
+        'The exact state of this target was not captured before planning',
+        'Run `wrkrs init --dry-run` again; if it persists, report it with the plan digest',
+      ),
+    )
+  }
+  const contained = containmentConflict(component.path, target)
+  if (contained) return blockedOperation(source, target.file ?? undefined, contained)
 
+  const existing: FileSnapshot | undefined = target.file ?? undefined
   const proposedHash = sha256(new TextEncoder().encode(component.content))
   const entry = installation?.entries.find((candidate) => candidate.path === component.path)
 
@@ -284,52 +318,150 @@ function classifyDesired(
   )
 }
 
+/** Existing ancestors of a target plus the target itself when it already exists. */
+function existingAncestors(operation: PlanOperation, snapshot: RepositorySnapshot): Set<string> {
+  const target = snapshot.targets.get(operation.path)
+  const existing = new Set(
+    (target?.ancestors ?? [])
+      .filter((ancestor) => ancestor.kind !== null)
+      .map((ancestor) => ancestor.path),
+  )
+  if (target?.file) existing.add(operation.path)
+  return existing
+}
+
+/** Names wrkrs will create: each created file and every ancestor that does not yet exist. */
+function plannedNames(operation: PlanOperation, snapshot: RepositorySnapshot): string[] {
+  const existing = existingAncestors(operation, snapshot)
+  return [
+    operation.path,
+    ...ancestorDirectories(operation.path).filter((ancestor) => !existing.has(ancestor)),
+  ]
+}
+
+/**
+ * Proves case-folded collision safety for every path segment wrkrs would
+ * create or write through, using the exact parent listings captured with the
+ * targets:
+ *
+ * - a name wrkrs creates must have no case-folded sibling;
+ * - an existing ancestor (or target) must appear in its parent listing under
+ *   its exact name, otherwise a case-insensitive filesystem aliased it to a
+ *   differently cased entry and the installed paths would be ambiguous.
+ *
+ * A missing or incomplete listing is a blocker: wrkrs never emits a create it
+ * cannot prove safe.
+ */
 function caseCollisionConflicts(
   operations: readonly PlanOperation[],
-  files: ReadonlyMap<string, FileSnapshot>,
+  snapshot: RepositorySnapshot,
 ): Map<string, Conflict> {
   const conflicts = new Map<string, Conflict>()
-  const existingByFold = new Map<string, string[]>()
-  for (const path of files.keys()) {
-    const key = caseFoldKey(path)
-    existingByFold.set(key, [...(existingByFold.get(key) ?? []), path])
-  }
-  const plannedByFold = new Map<string, string[]>()
   const creates = operations.filter((operation) => operation.outcome === 'create')
+  // Every desired target is checked, whatever its classification: an aliased
+  // match on a case-insensitive filesystem must block as a collision rather
+  // than be mistaken for content that differs or matches.
+  const checked = operations.filter(
+    (operation) =>
+      operation.outcome !== 'preserve' &&
+      snapshot.targets.get(operation.path)?.containment === 'ok',
+  )
+
+  const plannedByParent = new Map<string, Map<string, Set<string>>>()
   for (const operation of creates) {
-    for (const candidate of [operation.path, ...ancestorDirectories(operation.path)]) {
-      const key = caseFoldKey(candidate)
-      const list = plannedByFold.get(key) ?? []
-      if (!list.includes(candidate)) plannedByFold.set(key, [...list, candidate])
+    for (const name of plannedNames(operation, snapshot)) {
+      const parent = parentDirectory(name) ?? ''
+      const byFold = plannedByParent.get(parent) ?? new Map<string, Set<string>>()
+      const fold = caseFoldKey(baseName(name))
+      byFold.set(fold, new Set([...(byFold.get(fold) ?? []), baseName(name)]))
+      plannedByParent.set(parent, byFold)
     }
   }
-  for (const operation of creates) {
-    for (const candidate of [operation.path, ...ancestorDirectories(operation.path)]) {
-      const key = caseFoldKey(candidate)
-      const clashes = [
-        ...(existingByFold.get(key) ?? []),
-        ...(plannedByFold.get(key) ?? []),
-      ].filter((other) => other !== candidate)
-      if (clashes.length === 0) continue
-      const first = clashes.sort()[0] ?? ''
-      conflicts.set(
-        operation.path,
-        conflict(
-          'PATH',
-          'PATH_CASE_COLLISION',
+
+  const collision = (path: string, name: string, message: string): Conflict =>
+    conflict(
+      'PATH',
+      'PATH_CASE_COLLISION',
+      path,
+      `"${name}" ${message}, which is unsafe on case-insensitive filesystems`,
+      'Rename the existing path or the planned path so they no longer collide',
+    )
+
+  for (const operation of checked) {
+    const existing = existingAncestors(operation, snapshot)
+    const candidates = [...ancestorDirectories(operation.path), operation.path]
+    for (const name of candidates) {
+      const parent = parentDirectory(name) ?? ''
+      const base = baseName(name)
+      const fold = caseFoldKey(base)
+      const isExisting = existing.has(name)
+
+      if (!isExisting) {
+        const planned = plannedByParent.get(parent)?.get(fold) ?? new Set<string>()
+        const plannedClash = [...planned].find((other) => other !== base)
+        if (plannedClash) {
+          conflicts.set(
+            operation.path,
+            collision(
+              operation.path,
+              name,
+              `differs only by case from planned "${parent ? parent + '/' : ''}${plannedClash}"`,
+            ),
+          )
+          break
+        }
+      }
+
+      const parentExists = parent === '' || existing.has(parent)
+      if (!parentExists) continue
+      const listing = snapshot.listings.get(parent)
+      if (!listing || !listing.complete) {
+        conflicts.set(
           operation.path,
-          `"${candidate}" differs only by case from "${first}", which is unsafe on case-insensitive filesystems`,
-          'Rename the existing path or the planned path so they no longer collide',
-        ),
+          conflict(
+            'PRECONDITION',
+            'SCAN_INCOMPLETE',
+            operation.path,
+            `The listing of "${parent || '.'}" is incomplete, so collision safety for "${name}" cannot be proven`,
+            'Reduce the number of entries in that directory or move unrelated files aside, then run `wrkrs init --dry-run` again',
+          ),
+        )
+        break
+      }
+      const clash = listing.names.find(
+        (candidate) => candidate !== base && caseFoldKey(candidate) === fold,
       )
-      break
+      if (isExisting && !listing.names.includes(base)) {
+        conflicts.set(
+          operation.path,
+          collision(
+            operation.path,
+            name,
+            `exists only as the differently cased "${parent ? parent + '/' : ''}${clash ?? '?'}"`,
+          ),
+        )
+        break
+      }
+      if (clash) {
+        conflicts.set(
+          operation.path,
+          collision(
+            operation.path,
+            name,
+            `differs only by case from existing "${parent ? parent + '/' : ''}${clash}"`,
+          ),
+        )
+        break
+      }
     }
   }
   return conflicts
 }
 
 /**
- * Builds the immutable, create-only installation plan for `wrkrs init`.
+ * Builds the immutable, create-only installation plan for `wrkrs init` from
+ * exact target snapshots. The generic bounded index is never consulted for a
+ * generated target.
  */
 export function buildInitPlan(input: InitPlanInput): InstallPlan {
   const { snapshot } = input
@@ -341,11 +473,23 @@ export function buildInitPlan(input: InitPlanInput): InstallPlan {
     .sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0))
     .map((component) => classifyDesired(component, snapshot, installation))
 
-  const collisions = caseCollisionConflicts(operations, snapshot.files)
+  const collisions = caseCollisionConflicts(operations, snapshot)
   operations = operations.map((operation) => {
     const collision = collisions.get(operation.path)
-    if (!collision || operation.outcome !== 'create') return operation
-    return blockedOperation(operation, snapshot.files.get(operation.path), collision)
+    if (!collision) return operation
+    const source: OperationSource = {
+      path: operation.path,
+      component: operation.component,
+      reason: operation.reason,
+      management: operation.management,
+      sourceId: operation.sourceId,
+      sourceVersion: operation.sourceVersion,
+    }
+    return blockedOperation(
+      source,
+      snapshot.targets.get(operation.path)?.file ?? undefined,
+      collision,
+    )
   })
 
   for (const preserved of input.preserved) {
@@ -371,13 +515,18 @@ export function buildInitPlan(input: InitPlanInput): InstallPlan {
 
   const createdDirectorySet = new Set<string>()
   for (const operation of creates) {
-    for (const ancestor of ancestorDirectories(operation.path)) {
-      if (!snapshot.files.has(ancestor)) createdDirectorySet.add(ancestor)
-    }
+    for (const name of plannedNames(operation, snapshot).slice(1)) createdDirectorySet.add(name)
   }
-  if (!installation && (creates.length > 0 || reuses.length > 0)) {
+  const needsManifest = !installation && (creates.length > 0 || reuses.length > 0)
+  const manifestTarget = snapshot.targets.get(MANIFEST_PATH)
+  if (needsManifest) {
+    const existing = new Set(
+      (manifestTarget?.ancestors ?? [])
+        .filter((ancestor) => ancestor.kind !== null)
+        .map((ancestor) => ancestor.path),
+    )
     for (const ancestor of ancestorDirectories(MANIFEST_PATH)) {
-      if (!snapshot.files.has(ancestor)) createdDirectorySet.add(ancestor)
+      if (!existing.has(ancestor)) createdDirectorySet.add(ancestor)
     }
   }
   const createdDirectories = [...createdDirectorySet].sort(
@@ -407,7 +556,7 @@ export function buildInitPlan(input: InitPlanInput): InstallPlan {
     })),
   ].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0))
 
-  if (!installation && (creates.length > 0 || reuses.length > 0)) {
+  if (needsManifest) {
     const manifest: OwnershipManifest = {
       schemaVersion: MANIFEST_SCHEMA_VERSION,
       installationId,
@@ -419,7 +568,6 @@ export function buildInitPlan(input: InitPlanInput): InstallPlan {
       entries,
       createdDirectories,
     }
-    const existingManifest = snapshot.files.get(MANIFEST_PATH)
     const manifestSource: OperationSource = {
       path: MANIFEST_PATH,
       component: CORE_COMPONENT,
@@ -428,7 +576,19 @@ export function buildInitPlan(input: InitPlanInput): InstallPlan {
       sourceId: MANIFEST_SOURCE_ID,
       sourceVersion: MANIFEST_SCHEMA_VERSION,
     }
-    if (existingManifest) {
+    const manifestContainment = manifestTarget
+      ? containmentConflict(MANIFEST_PATH, manifestTarget)
+      : conflict(
+          'PRECONDITION',
+          'SCAN_TARGET_UNVERIFIED',
+          MANIFEST_PATH,
+          'The exact state of the manifest path was not captured before planning',
+          'Run `wrkrs init --dry-run` again; if it persists, report it with the plan digest',
+        )
+    const existingManifest = manifestTarget?.file ?? undefined
+    if (manifestContainment) {
+      operations.push(blockedOperation(manifestSource, existingManifest, manifestContainment))
+    } else if (existingManifest) {
       operations.push(
         blockedOperation(
           manifestSource,

@@ -1,13 +1,16 @@
 import { parseManifestDocument } from '../../config/load.js'
 import { createDiagnostic, type Diagnostic } from '../../core/diagnostics.js'
 import { MANIFEST_PATH } from '../../core/ownership.js'
-import { toSystemPath } from '../../platform/paths.js'
-import { readRepositoryText, type CheckContext } from '../context.js'
+import { containmentDiagnostic, type CheckContext } from '../context.js'
 
 export async function checkManifest(context: CheckContext): Promise<Diagnostic[]> {
   const diagnostics: Diagnostic[] = []
-  const systemPath = toSystemPath(context.root, MANIFEST_PATH)
-  const stat = await context.fs.lstat(systemPath)
+  const resolved = await context.reader.resolve(MANIFEST_PATH)
+  if (!resolved.ok) {
+    diagnostics.push(containmentDiagnostic('MANIFEST_PATH_UNSAFE', 'error', resolved.error))
+    return diagnostics
+  }
+  const stat = resolved.value.stat
   if (!stat) {
     diagnostics.push(
       createDiagnostic(
@@ -25,14 +28,24 @@ export async function checkManifest(context: CheckContext): Promise<Diagnostic[]
   }
   if (stat.kind !== 'file') {
     diagnostics.push(
-      createDiagnostic('MANIFEST_NOT_A_FILE', 'error', `.wrkrs/manifest.json is a ${stat.kind}`, {
-        path: MANIFEST_PATH,
-        remediation: 'Replace the path with a regular file',
-      }),
+      createDiagnostic(
+        stat.kind === 'symlink' ? 'MANIFEST_PATH_UNSAFE' : 'MANIFEST_NOT_A_FILE',
+        'error',
+        `.wrkrs/manifest.json is a ${stat.kind}; wrkrs did not read it`,
+        {
+          path: MANIFEST_PATH,
+          remediation: 'Replace the path with a regular file',
+        },
+      ),
     )
     return diagnostics
   }
-  const parsed = parseManifestDocument(await readRepositoryText(context, systemPath))
+  const text = await context.reader.readText(MANIFEST_PATH)
+  if (!text.ok) {
+    diagnostics.push(containmentDiagnostic('MANIFEST_PATH_UNSAFE', 'error', text.error))
+    return diagnostics
+  }
+  const parsed = parseManifestDocument(text.value ?? '')
   if (!parsed.ok) {
     if (parsed.error.issues.length === 0) {
       diagnostics.push(

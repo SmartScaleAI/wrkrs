@@ -25,7 +25,9 @@ Consequence:
 - No implementation code or unrelated repository changes exist to preserve.
 - The owner must approve initializing this workspace as the new wrkrs repository or attach the intended repository before implementation.
 
-Resolution (2026-08-29): the owner selected the public GitHub repository SmartScaleAI/wrkrs, licensed under MIT, as the implementation repository. The local checkout is a Git repository on main with that repository configured as origin. The remote repository exists and is empty; nothing has been committed or pushed.
+Resolution (2026-08-29): the owner selected the public GitHub repository SmartScaleAI/wrkrs, licensed under MIT, as the implementation repository. The local checkout is a Git repository on main with that repository configured as origin. At the time of that resolution the remote repository existed and was empty and nothing had been committed or pushed.
+
+Update (2026-08-29, later): the first vertical slice was committed as a8e4a5ba567dc06a96868bf941b242a00e30df49 and pushed to the review branch review/mvp-vertical-slice. The remote now also has main at that same commit as its default branch.
 
 ## Locked product decisions
 
@@ -393,6 +395,26 @@ Rationale:
 - Keeping transaction bookkeeping inside .wrkrs avoids writing anywhere outside the planned installation footprint.
 - Treating an existing installation as read-only for init keeps update semantics in the planned update command instead of duplicating them.
 
+### A-016: Review remediation of the first vertical slice
+
+Status: Proposed  
+Date: 2026-08-29
+
+An independent review of commit a8e4a5ba567dc06a96868bf941b242a00e30df49 confirmed five findings. The corrections below were implemented as local changes on review/mvp-vertical-slice and are recorded here for owner review. None changes approved scope; each tightens an already-approved safety promise.
+
+Decision:
+
+- Publication is atomic and never replaces. `FileSystemPort.publishFileExclusive(staging, target)` creates the target name with a hard link (`copyFile` with `COPYFILE_EXCL` only where hard links are unsupported) and fails with EEXIST for any existing file, directory, or symlink. The earlier absence check followed by `rename` is gone because `rename` can replace a file created concurrently. A target that appears is reported as `PRECONDITION_TARGET_APPEARED` with its exact path and is never touched.
+- Journal persistence is durable and rollback is reconciled. The journal is replaced through a temporary sibling and `rename`, never truncated in place. Journal operations record the staging path and expected hash before publication and move through planned, staged, published, and applied; the in-memory journal is advanced before each persistence attempt. Rollback reconciles staging and target paths against recorded hashes, deletes only hash-matching files, verifies every created path is gone, and reports rolled-back only then; otherwise rollback-incomplete lists every exact retained path and the journal is kept. A file whose bytes no longer match what wrkrs wrote is retained, because it is indistinguishable from an external edit.
+- Reads are contained. The scanner, `wrkrs check`, and Claude adapter validation read only through `platform/contained-path.ts`, which normalizes paths, inspects every ancestor with lstat, refuses symlinked ancestors and symlinked targets, and proves the real ancestor stays inside the real root. The `.wrkrs` and `.claude` types are checked before any child is read.
+- Parser diagnostics are sanitized. YAML and JSON parser messages are never forwarded; controlled codes with line and column metadata replace them for config, manifest, and journal parsing. Schema violation messages are limited to expected-shape text. Unexpected CLI errors print only the error class.
+- Bounded scans cannot misclassify a known target. Every desired generated target and its ancestors are snapshotted exactly after desired-state compilation, together with parent directory listings, and the planner classifies only from those. Incomplete listings block with `SCAN_INCOMPLETE`; case-aliased ancestors or targets block with `PATH_CASE_COLLISION`.
+- Journal format change: the journal operation gained `expectedHash` and the `published` status. The journal is transient transaction bookkeeping with no released consumer, so no migration is provided; `check` reports a journal it cannot parse as `TRANSACTION_JOURNAL_UNREADABLE`.
+
+Rationale:
+
+- Each finding described a way an already-promised invariant (no overwrite, provable rollback, no reads outside the worktree, no secret leakage, exact dry run) could be violated under a race, a crash, a symlink, a malformed file, or a large tree. The corrections make the invariants hold by construction and are proven by fault-injection tests.
+
 ## Deferred decisions
 
 ### D-001: Exact provider authentication and capability mappings
@@ -438,4 +460,4 @@ Vertical slice approval: Approved by the owner on 2026-08-29
 Production dependency approval: Approved by the owner on 2026-08-29 (commander, zod, yaml)  
 Implementation repository selection: Approved by the owner on 2026-08-29 (github.com/SmartScaleAI/wrkrs, public, MIT)
 
-Implementation status: the first vertical slice was implemented on 2026-08-29 and left as uncommitted local changes for owner review. No commit, push, pull request, npm publication, deployment, merge, or release has occurred.
+Implementation status: the first vertical slice was implemented on 2026-08-29, committed as a8e4a5ba567dc06a96868bf941b242a00e30df49 on review/mvp-vertical-slice, and pushed to origin for independent review; the remote's default branch main also points at that commit. The review remediation (A-016) is held as uncommitted local changes on review/mvp-vertical-slice pending owner review. No pull request, npm publication, deployment, merge, or release has occurred.
