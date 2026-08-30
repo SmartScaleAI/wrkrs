@@ -1,4 +1,4 @@
-import { existsSync, promises as fsp, readFileSync, statSync } from 'node:fs'
+import { existsSync, promises as fsp, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import * as path from 'node:path'
 
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -40,9 +40,14 @@ type Matcher = (name: string, directory: string) => boolean
  * Makes the real exclusive write fail *after* its entry exists: the O_EXCL
  * open runs for real, the first half of the bytes is written for real, and
  * then the handle's writeFile rejects with EIO. Armed only for names the
- * matcher selects.
+ * matcher selects. `afterFailure` runs inside the bound directory right after
+ * the injected failure, before the transaction reacts.
  */
-async function partialWriteFailure(match: Matcher, extra: FileSystemInterceptors['bound'] = {}) {
+async function partialWriteFailure(
+  match: Matcher,
+  extra: FileSystemInterceptors['bound'] = {},
+  afterFailure?: (name: string) => void,
+) {
   const probeDirectory = makeTempDir()
   cleanup.push(probeDirectory)
   const probe = await fsp.open(path.join(probeDirectory, 'probe'), 'w')
@@ -72,6 +77,9 @@ async function partialWriteFailure(match: Matcher, extra: FileSystemInterceptors
         if (match(args[0], directory.relativePath)) state.armed = true
         try {
           return await next(...args)
+        } catch (error) {
+          if (afterFailure && match(args[0], directory.relativePath)) afterFailure(args[0])
+          throw error
         } finally {
           state.armed = false
         }
@@ -100,11 +108,15 @@ function stagingEntries(root: string): string[] {
 }
 
 describe('exclusive writes that fail after the entry was created', () => {
+  // Conservative behavior recorded in decisions.md A-019: a partial staging
+  // entry is never deleted, because no portable primitive proves the current
+  // directory entry is still the file wrkrs created. Earlier rounds deleted
+  // it when its bytes were a prefix of the planned bytes; that inference was
+  // removed as unsound.
   it.each(['clean-repository', 'existing-claude-repository'] as FixtureName[])(
-    'removes a partially written staging file and restores the exact tree (%s)',
+    'retains a partially written staging file, reports its exact path, and removes everything else (%s)',
     async (fixture) => {
       const root = repo(fixture)
-      const before = hashTree(root)
       const injected = await partialWriteFailure(
         (name, dir) => dir === AGENTS && STAGING.test(name),
       )
@@ -112,48 +124,66 @@ describe('exclusive writes that fail after the entry was created', () => {
       const prepared = await prepare(root, ports)
       const result = await applyPreparedInit(prepared, createTestDependencies(), ports)
       expect(injected.hits()).toBe(1)
-      expect(result.status).toBe('rolled-back')
-      if (result.status === 'rolled-back') expect(result.failure).toContain('EIO')
-      expect(stagingEntries(root)).toEqual([])
-      expect(hashTree(root)).toBe(before)
+      expect(result.status).toBe('rollback-incomplete')
+      if (result.status !== 'rollback-incomplete') return
+      const staging = stagingEntries(root)
+      expect(staging).toHaveLength(1)
+      expect(result.retained.map((item) => item.path)).toContain(staging[0])
+      const retainedEntry = result.retained.find((item) => item.path === staging[0])
+      expect(retainedEntry!.reason).toContain('cannot prove')
+      const planned = prepared.plan.operations.find(
+        (operation) => operation.path === `${AGENTS}/${AGENT}`,
+      )!
+      expect(readFileSync(path.join(root, ...staging[0]!.split('/'))).byteLength).toBeLessThan(
+        planned.proposedSize!,
+      )
+      // The target was never published and every other generated file is gone.
+      expect(existsSync(path.join(root, ...AGENTS.split('/'), AGENT))).toBe(false)
+      expect(
+        readTree(root).filter(
+          (entry) =>
+            entry.path.includes('wrkrs-') && !STAGING.test(path.posix.basename(entry.path)),
+        ),
+      ).toEqual([])
+      const journal = parseJournalDocument(
+        readFileSync(path.join(root, '.wrkrs', '.journal.json'), 'utf8'),
+      )
+      expect(journal.ok && journal.value.status).toBe('rollback-incomplete')
+      expect(
+        journal.ok &&
+          journal.value.operations.find((op) => op.path === `${AGENTS}/${AGENT}`)?.stagingPath,
+      ).toBe(staging[0])
     },
   )
 
-  it('names the exact partially written staging file when its cleanup fails', async () => {
+  it('preserves an external replacement of the partial staging entry byte-for-byte and mode-for-mode', async () => {
     const root = repo('existing-claude-repository')
+    let replaced: string | null = null
     const injected = await partialWriteFailure(
       (name, dir) => dir === AGENTS && STAGING.test(name),
-      {
-        unlink: async (args, next, directory) => {
-          if (directory.relativePath === AGENTS && STAGING.test(args[0])) {
-            throw new FileSystemError('EPERM', args[0], 'injected: cannot remove staging')
-          }
-          return next(...args)
-        },
+      {},
+      (name) => {
+        // Another process replaces the partial entry (relative to the bound
+        // directory) with its own empty file before rollback runs.
+        rmSync(name)
+        writeFileSync(name, '', { mode: 0o600 })
+        replaced = name
       },
     )
     const ports = createTestPorts({ fs: injected.fs })
     const prepared = await prepare(root, ports)
     const result = await applyPreparedInit(prepared, createTestDependencies(), ports)
+    expect(injected.hits()).toBe(1)
+    expect(replaced).not.toBeNull()
     expect(result.status).toBe('rollback-incomplete')
     if (result.status !== 'rollback-incomplete') return
-    const staging = stagingEntries(root)
-    expect(staging).toHaveLength(1)
-    expect(result.retained.map((item) => item.path)).toContain(staging[0])
-    const planned = prepared.plan.operations.find(
-      (operation) => operation.path === `${AGENTS}/${AGENT}`,
-    )!
-    const partial = readFileSync(path.join(root, ...staging[0]!.split('/')))
-    expect(partial.byteLength).toBeLessThan(planned.proposedSize!)
-    expect(existsSync(path.join(root, ...AGENTS.split('/'), AGENT))).toBe(false)
-    const journal = parseJournalDocument(
-      readFileSync(path.join(root, '.wrkrs', '.journal.json'), 'utf8'),
-    )
-    expect(journal.ok && journal.value.status).toBe('rollback-incomplete')
-    expect(
-      journal.ok &&
-        journal.value.operations.find((op) => op.path === `${AGENTS}/${AGENT}`)?.stagingPath,
-    ).toBe(staging[0])
+    const stagingPath = `${AGENTS}/${replaced!}`
+    expect(result.retained.map((item) => item.path)).toContain(stagingPath)
+    const external = path.join(root, ...stagingPath.split('/'))
+    expect(existsSync(external)).toBe(true)
+    expect(readFileSync(external, 'utf8')).toBe('')
+    expect(fileMode(external)).toBe(0o600)
+    expect(statSync(external).size).toBe(0)
   })
 
   it('never returns plain aborted while a partially written lock remains', async () => {
@@ -238,7 +268,7 @@ describe('exclusive writes that fail after the entry was created', () => {
     expect(hashTree(root)).toBe(before)
   })
 
-  it('reports the exact journal temporary when it cannot be removed, and never truncates the live journal', async () => {
+  it('reports the exact journal temporary when it can never be removed, without duplicate entries', async () => {
     const root = repo()
     let seen = 0
     const injected = await partialWriteFailure(
@@ -265,7 +295,9 @@ describe('exclusive writes that fail after the entry was created', () => {
       .filter((entry) => JOURNAL_TEMP.test(path.posix.basename(entry)))
     expect(temps).toHaveLength(1)
     if (result.status === 'rollback-incomplete') {
-      expect(result.retained.map((item) => item.path)).toContain(temps[0])
+      const paths = result.retained.map((item) => item.path)
+      expect(paths).toContain(temps[0])
+      expect(new Set(paths).size).toBe(paths.length)
     }
     const live = parseJournalDocument(
       readFileSync(path.join(root, '.wrkrs', '.journal.json'), 'utf8'),
@@ -339,7 +371,7 @@ describe('exclusive writes that fail after the entry was created', () => {
       (name, dir) => dir === AGENTS && STAGING.test(name),
       {
         unlink: async (args, next, directory) => {
-          // Pretend the removal succeeded while the entry stays on disk.
+          // Pretend a removal succeeded while the entry stays on disk.
           if (directory.relativePath === AGENTS && STAGING.test(args[0])) return
           return next(...args)
         },

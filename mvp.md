@@ -408,4 +408,14 @@ Third review round regression tests (decisions.md A-018):
 | Removal durability ordering for staging cleanup, target and staging rollback, generated directories; EIO after rollback unlink and during bookkeeping cleanup; unsupported sync; serialized best-effort journal | test/unit/writer/removal-durability.test.ts |
 | Process-wide binding: nested call rejected promptly, cross-instance serialization, concurrent repositories isolated, closed BoundDirectory refused, working directory restored, segment disappearing or changing during binding | test/unit/platform/binding.test.ts |
 
+Fourth review round regression tests (decisions.md A-019):
+
+| Finding | Where |
+| --- | --- |
+| Conservative partial-staging retention: exact retained path in both fixtures, external replacement preserved byte- and mode-for-mode, no rolled-back while a staging name exists | test/unit/writer/exclusive-write.test.ts |
+| Lock creation tracked separately from its directory sync: EIO after creation in transaction-created and pre-existing .wrkrs, exact-tree restore, unremovable lock with recovery journal | test/unit/writer/bookkeeping.test.ts |
+| Durable final lock release on the rollback-incomplete exit: unlink failure, sync failure after removal, faked unlink, unique retained paths | test/unit/writer/bookkeeping.test.ts |
+| Successful installs keep .wrkrs with no bookkeeping warning and pass check | test/unit/writer/bookkeeping.test.ts |
+| Journal-temp retention cleared after proven cleanup; permanent failure still names the existing temp exactly | test/unit/writer/bookkeeping.test.ts, test/unit/writer/exclusive-write.test.ts |
+
 Deliberately deferred, unchanged from the approved scope: update, uninstall, shared-file structural edits, providers, and cross-platform CI. Verified on macOS with Node 22.23.2 and 24.18.1. Linux is unverified; Windows fails closed by design in this MVP and is not supported until the cross-platform increment.

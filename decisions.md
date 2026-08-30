@@ -462,6 +462,27 @@ Rationale:
 - The working directory is a process-wide resource, so its coordination must be process-wide, and a nested request must be refused rather than queued behind the caller that would never release it.
 - Failing closed on Windows is the only honest option without native `openat`-style primitives; the reviewer required stopping or failing closed rather than shipping an unverified invariant.
 
+### A-019: Fourth review round: conservative partial-staging retention and bookkeeping honesty
+
+Status: Proposed  
+Date: 2026-08-30
+
+An independent review of commit 61df451e41d6884082983af1376c5a030a300f7b confirmed five remaining findings in the A-018 implementation. The corrections below were implemented on review/mvp-vertical-slice and are recorded for owner review; A-018 stands as history (its prefix-based ownership claim is superseded here). Scope is unchanged.
+
+Decision:
+
+- No content-based ownership proof. Rollback no longer deletes an incomplete staging entry whose bytes are a prefix of the planned bytes: a prefix — including an empty file — does not prove the current directory entry is still the one wrkrs created, and Node offers no identity-conditional unlink. The conservative MVP behavior is to retain the entry, return rollback-incomplete, and report its exact repository-relative path; an externally replaced or edited entry is preserved byte-for-byte and mode-for-mode. Fully written files keep the exact-hash removal policy. Consequence: a partial staging write now ends in rollback-incomplete rather than rolled-back, and the affected tests were updated to expect the stricter result.
+- Lock creation tracked separately from its directory sync. A FileSystemError is treated as "nothing created" only when the exclusive create itself failed before creation; a directory-sync failure after a successful create reconciles the lock through the created-entry cleanup path (remove, verify, sync, or report `.wrkrs/.lock` exactly with recovery bookkeeping). A genuinely pre-existing EEXIST lock is preserved unchanged. `aborted` is never returned while a lock created by this transaction remains.
+- Durable final lock release. The rollback-incomplete exit releases the lock through the same removal contract as everything else — unlink, verify absence, sync, then forget — before the final journal write, so the persisted durability and the retained list match the filesystem. Unlink, containment, inspection, and sync failures are reported (`.wrkrs/.lock` exactly; "not proven durable" when only the sync failed), and the live rollback-incomplete journal remains the recovery record.
+- The installed .wrkrs directory is not bookkeeping. A successful commit removes only the lock, the journal temporary, and the live journal; `.wrkrs` and its repository-owned contents (config, schema, roles, manifest) stay, no `TRANSACTION_BOOKKEEPING_RETAINED` warning is emitted for them, and output never tells users to remove the installation directory. A transaction-created `.wrkrs` is removed only on abort or rollback.
+- Journal-temp retention reflects proven state. A temporary retained by an earlier failed cleanup is retried during bookkeeping release and removed from the retention map only after unlink, absence verification, and a successful directory sync; a transient fail-once error therefore no longer produces rollback-incomplete naming a nonexistent temp, a permanent failure still names the existing one exactly, and retained lists carry no duplicates.
+
+Rationale:
+
+- Content equality can be forged by any process; only the exact-hash policy on fully written, fsynced files plus O_EXCL creation semantics gives a defensible deletion proof, and where no proof exists the honest answer is retention.
+- A warning that tells the user to delete the freshly installed configuration directory is worse than no warning; bookkeeping and installed content must never share a cleanup path.
+- Retained-path reports are only useful if they describe the filesystem as it is, which requires clearing state after proven cleanup and applying the durable removal contract on every exit.
+
 ## Deferred decisions
 
 ### D-001: Exact provider authentication and capability mappings
@@ -507,4 +528,4 @@ Vertical slice approval: Approved by the owner on 2026-08-29
 Production dependency approval: Approved by the owner on 2026-08-29 (commander, zod, yaml)  
 Implementation repository selection: Approved by the owner on 2026-08-29 (github.com/SmartScaleAI/wrkrs, public, MIT)
 
-Implementation status: the first vertical slice was implemented on 2026-08-29, committed as a8e4a5ba567dc06a96868bf941b242a00e30df49 on review/mvp-vertical-slice, and pushed to origin for independent review; the remote's default branch main also points at that commit. The first review remediation (A-016) was committed as baab7195004463c06ff3bc0aa1b8b765eb34df0b on review/mvp-vertical-slice and pushed; the second (A-017) as 14c8c4c0890196741a86e7ad045c04bb5ef0e81a; the third (A-018) follows on the same branch. No pull request, npm publication, deployment, merge, or release has occurred.
+Implementation status: the first vertical slice was implemented on 2026-08-29, committed as a8e4a5ba567dc06a96868bf941b242a00e30df49 on review/mvp-vertical-slice, and pushed to origin for independent review; the remote's default branch main also points at that commit. The first review remediation (A-016) was committed as baab7195004463c06ff3bc0aa1b8b765eb34df0b on review/mvp-vertical-slice and pushed; the second (A-017) as 14c8c4c0890196741a86e7ad045c04bb5ef0e81a; the third (A-018) as 61df451e41d6884082983af1376c5a030a300f7b; the fourth (A-019) follows on the same branch. No pull request, npm publication, deployment, merge, or release has occurred.

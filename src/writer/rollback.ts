@@ -27,14 +27,6 @@ function ancestorMissing(error: unknown): boolean {
   return error instanceof ContainmentError && error.code === 'PATH_ANCESTOR_MISSING'
 }
 
-function isPrefix(candidate: Uint8Array, full: Uint8Array): boolean {
-  if (candidate.byteLength > full.byteLength) return false
-  for (let index = 0; index < candidate.byteLength; index += 1) {
-    if (candidate[index] !== full[index]) return false
-  }
-  return true
-}
-
 const DURABILITY_UNPROVEN =
   'removed, but the directory sync failed so the removal is not proven durable'
 
@@ -46,12 +38,13 @@ const DURABILITY_UNPROVEN =
  * real sync failure is never swallowed: the path is retained as "durability
  * unproven" and the transaction reports rollback-incomplete.
  *
- * A file is deleted only when it is proven to be wrkrs's: its hash equals the
- * recorded expected hash, or, for a staging entry whose exclusive write
- * failed after creation, its bytes are a prefix of the planned bytes (a
- * partial write of wrkrs's own data). Anything else — external content, a
- * later modification, a non-regular file, an unbindable parent — is retained
- * and reported by exact path.
+ * A file is deleted only when it is proven to be wrkrs's: its current hash
+ * equals the recorded expected hash of the fully written content. An
+ * incomplete staging entry from a failed exclusive write is never deleted,
+ * because no portable primitive can prove the current directory entry is
+ * still the one wrkrs created; it is retained and reported by exact path.
+ * Anything else — external content, a later modification, a non-regular
+ * file, an unbindable parent — is likewise retained and reported.
  *
  * The in-memory journal is authoritative: it records a staging name before
  * the exclusive write, publication before any fallible step, and keeps the
@@ -63,8 +56,6 @@ export async function rollbackTransaction(input: {
   fs: FileSystemPort
   journal: TransactionJournal
   persist: (journal: TransactionJournal) => Promise<TransactionJournal>
-  /** Planned bytes for a target path, used to recognize wrkrs's own partial staging writes. */
-  expectedBytes: (targetPath: string) => Uint8Array | null
 }): Promise<RollbackOutcome> {
   const { root, fs } = input
   let journal = input.journal
@@ -92,7 +83,6 @@ export async function rollbackTransaction(input: {
     relativePath: string,
     expectedHash: string | null,
     what: string,
-    partialOf: Uint8Array | null,
   ): Promise<'removed' | 'absent' | 'retained'> => {
     const directory = parentDirectory(relativePath) ?? ''
     const name = baseName(relativePath)
@@ -106,9 +96,7 @@ export async function rollbackTransaction(input: {
         }
         const bytes = await bound.readFile(name)
         const currentHash = sha256(bytes)
-        const complete = expectedHash !== null && currentHash === expectedHash
-        const partial = partialOf !== null && isPrefix(bytes, partialOf)
-        if (!complete && !partial) {
+        if (expectedHash === null || currentHash !== expectedHash) {
           retain(
             relativePath,
             `${what} differs from what wrkrs wrote; the external change is preserved`,
@@ -130,6 +118,30 @@ export async function rollbackTransaction(input: {
         journal = withDurability(journal, sync)
         return 'removed'
       })
+    } catch (error) {
+      if (ancestorMissing(error)) return 'absent'
+      retain(relativePath, describe(error))
+      return 'retained'
+    }
+  }
+
+  /**
+   * An incomplete staging entry (its exclusive write failed after creation)
+   * is never deleted: Node has no identity-conditional unlink, so wrkrs
+   * cannot prove the current entry is still the file it created rather than
+   * an external replacement. It is retained and reported by exact path.
+   */
+  const retainIncompleteStaging = async (relativePath: string): Promise<'absent' | 'retained'> => {
+    const directory = parentDirectory(relativePath) ?? ''
+    const name = baseName(relativePath)
+    try {
+      const stat = await fs.withinDirectory(root, directory, (bound) => bound.lstat(name))
+      if (!stat) return 'absent'
+      retain(
+        relativePath,
+        'incomplete staging entry from a failed exclusive write; wrkrs cannot prove the current entry is still the file it created, so it is preserved',
+      )
+      return 'retained'
     } catch (error) {
       if (ancestorMissing(error)) return 'absent'
       retain(relativePath, describe(error))
@@ -187,17 +199,14 @@ export async function rollbackTransaction(input: {
 
     let clean = true
     if (operation.stagingPath) {
-      const partialOf = operation.status === 'staging' ? input.expectedBytes(operation.path) : null
-      const result = await removeIfOurs(
-        operation.stagingPath,
-        operation.expectedHash,
-        'staging file',
-        partialOf,
-      )
+      const result =
+        operation.status === 'staging'
+          ? await retainIncompleteStaging(operation.stagingPath)
+          : await removeIfOurs(operation.stagingPath, operation.expectedHash, 'staging file')
       if (result === 'retained') clean = false
     }
     if (operation.status === 'published' || operation.status === 'applied') {
-      const result = await removeIfOurs(operation.path, operation.expectedHash, 'file', null)
+      const result = await removeIfOurs(operation.path, operation.expectedHash, 'file')
       if (result === 'retained') clean = false
     }
     // A 'staging' or 'staged' operation never published its target
