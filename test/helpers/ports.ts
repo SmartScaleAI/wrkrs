@@ -1,6 +1,6 @@
 import { createClaudeCodeAdapter } from '../../src/adapters/claude-code/adapter.js'
 import { createRuntimeAdapterRegistry } from '../../src/adapters/registry.js'
-import type { EnvironmentPort, FileSystemPort } from '../../src/core/ports.js'
+import type { BoundDirectory, EnvironmentPort, FileSystemPort } from '../../src/core/ports.js'
 import type { InitDependencies, InitPorts } from '../../src/init/init.js'
 import { createFixedClock } from '../../src/platform/clock.js'
 import { createNodeEnvironment } from '../../src/platform/environment.js'
@@ -41,46 +41,101 @@ export function createTestDependencies(
   }
 }
 
-type Method = keyof FileSystemPort
-type Interceptor<K extends Method> = (
-  args: Parameters<FileSystemPort[K]>,
-  next: FileSystemPort[K],
-) => ReturnType<FileSystemPort[K]>
+type BoundMethod = Exclude<keyof BoundDirectory, 'relativePath'>
 
-export type FileSystemInterceptors = { [K in Method]?: Interceptor<K> }
+/** Interceptor for one bound-directory method: receives the arguments, the real method, and the bound directory. */
+export type BoundInterceptor<K extends BoundMethod> = (
+  args: Parameters<BoundDirectory[K]>,
+  next: BoundDirectory[K],
+  directory: BoundDirectory,
+) => ReturnType<BoundDirectory[K]>
+
+export type BoundInterceptors = { [K in BoundMethod]?: BoundInterceptor<K> }
+
+export interface FileSystemInterceptors {
+  lstat?: (
+    args: Parameters<FileSystemPort['lstat']>,
+    next: FileSystemPort['lstat'],
+  ) => ReturnType<FileSystemPort['lstat']>
+  realpath?: (
+    args: Parameters<FileSystemPort['realpath']>,
+    next: FileSystemPort['realpath'],
+  ) => ReturnType<FileSystemPort['realpath']>
+  /** Runs around every withinDirectory call (before binding); may inspect root and directory. */
+  withinDirectory?: (
+    context: { root: string; relativeDirectory: string },
+    next: () => Promise<unknown>,
+  ) => Promise<unknown>
+  /** Interceptors for operations inside the bound directory. */
+  bound?: BoundInterceptors
+}
+
+function wrapBound(directory: BoundDirectory, interceptors: BoundInterceptors): BoundDirectory {
+  const wrapped: Record<string, unknown> = { relativePath: directory.relativePath }
+  for (const method of Object.keys(directory) as (keyof BoundDirectory)[]) {
+    if (method === 'relativePath') continue
+    const original = directory[method] as (...args: unknown[]) => unknown
+    const interceptor = interceptors[method] as
+      | ((
+          args: unknown[],
+          next: (...args: unknown[]) => unknown,
+          directory: BoundDirectory,
+        ) => unknown)
+      | undefined
+    wrapped[method] = interceptor
+      ? (...args: unknown[]) => interceptor(args, original.bind(directory), directory)
+      : (...args: unknown[]) => original.apply(directory, args)
+  }
+  return wrapped as unknown as BoundDirectory
+}
 
 /**
  * Fault-injection seam: wraps a real filesystem port so tests can fail,
  * delay, or tamper with specific operations while every other call hits the
- * disk. Each interceptor receives the original arguments and the real method.
+ * disk. Bound-directory interceptors run inside the real binding, so a test
+ * that swaps an ancestor from inside an interceptor exercises the genuine
+ * containment mechanism.
  */
 export function interceptFileSystem(
   inner: FileSystemPort,
   interceptors: FileSystemInterceptors,
 ): FileSystemPort {
-  const wrapped: Record<string, unknown> = {}
-  for (const method of Object.keys(inner) as Method[]) {
-    const original = inner[method] as (...args: unknown[]) => unknown
-    const interceptor = interceptors[method] as
-      ((args: unknown[], next: (...args: unknown[]) => unknown) => unknown) | undefined
-    wrapped[method] = interceptor
-      ? (...args: unknown[]) => interceptor(args, original.bind(inner))
-      : (...args: unknown[]) => original.apply(inner, args)
+  return {
+    lstat: (...args) =>
+      interceptors.lstat ? interceptors.lstat(args, inner.lstat.bind(inner)) : inner.lstat(...args),
+    realpath: (...args) =>
+      interceptors.realpath
+        ? interceptors.realpath(args, inner.realpath.bind(inner))
+        : inner.realpath(...args),
+    withinDirectory: <T>(
+      root: string,
+      relativeDirectory: string,
+      operation: (directory: BoundDirectory) => Promise<T>,
+    ): Promise<T> => {
+      const run = () =>
+        inner.withinDirectory(root, relativeDirectory, (directory) =>
+          operation(interceptors.bound ? wrapBound(directory, interceptors.bound) : directory),
+        )
+      return interceptors.withinDirectory
+        ? (interceptors.withinDirectory({ root, relativeDirectory }, run) as Promise<T>)
+        : run()
+    },
   }
-  return wrapped as unknown as FileSystemPort
 }
 
-/** Records every path passed to a read operation so tests can prove containment. */
+/** Records every bound read (directory/name) so tests can prove containment. */
 export function recordReads(inner: FileSystemPort): { fs: FileSystemPort; reads: string[] } {
   const reads: string[] = []
   const fs = interceptFileSystem(inner, {
-    readFile: (args, next) => {
-      reads.push(args[0])
-      return next(...args)
-    },
-    readDirectory: (args, next) => {
-      reads.push(args[0])
-      return next(...args)
+    bound: {
+      readFile: (args, next, directory) => {
+        reads.push(directory.relativePath === '' ? args[0] : `${directory.relativePath}/${args[0]}`)
+        return next(...args)
+      },
+      readDirectory: (args, next, directory) => {
+        reads.push(directory.relativePath === '' ? '.' : `${directory.relativePath}/`)
+        return next(...args)
+      },
     },
   })
   return { fs, reads }

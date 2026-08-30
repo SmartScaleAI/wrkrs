@@ -62,16 +62,14 @@ function expectNoLeak(text: string): void {
   expect(text).not.toContain(OUTSIDE_SENTINEL.slice(0, 10))
 }
 
-function expectNoReadsThrough(
-  reads: string[],
-  root: string,
-  outside: string,
-  prefixes: string[],
-): void {
+function expectNoReadsThrough(reads: string[], prefixes: string[]): void {
   for (const read of reads) {
-    expect(read.startsWith(outside)).toBe(false)
+    // Bound reads are recorded as "<directory>/<name>"; anything absolute or
+    // traversing would mean a read escaped the bound directory model.
+    expect(read.startsWith('/')).toBe(false)
+    expect(read.includes('..')).toBe(false)
     for (const prefix of prefixes) {
-      expect(read.startsWith(path.join(root, ...prefix.split('/')) + path.sep)).toBe(false)
+      expect(read === `${prefix}/` || read.startsWith(`${prefix}/`)).toBe(false)
     }
   }
 }
@@ -139,7 +137,7 @@ describe('read containment', () => {
     )
     expectNoLeak(check.human)
     expectNoLeak(check.json)
-    expectNoReadsThrough(reads, root, outside, ['.wrkrs'])
+    expectNoReadsThrough(reads, ['.wrkrs'])
     expect(hashTree(root)).toBe(before)
   })
 
@@ -163,7 +161,7 @@ describe('read containment', () => {
     ).toEqual(expect.not.arrayContaining(['.claude/agents/wrkrs-product-manager.md']))
     expectNoLeak(dry.human)
     expectNoLeak(dry.json)
-    expectNoReadsThrough(reads, root, outside, ['.claude'])
+    expectNoReadsThrough(reads, ['.claude'])
   })
 
   it('never reads a configured role source through a symlinked ancestor during check', async () => {
@@ -191,7 +189,7 @@ describe('read containment', () => {
     ).toBe('.wrkrs/roles')
     expectNoLeak(check.human)
     expectNoLeak(check.json)
-    expectNoReadsThrough(reads, root, outside, ['.wrkrs/roles'])
+    expectNoReadsThrough(reads, ['.wrkrs/roles'])
   })
 
   it('never reads a final-path symlink (config, agent) that points outside the repository', async () => {
@@ -223,9 +221,9 @@ describe('read containment', () => {
     expect(codes).toContain('OWNED_PATH_UNSAFE')
     expectNoLeak(check.human)
     expectNoLeak(check.json)
-    expect(reads.some((read) => read.startsWith(outside))).toBe(false)
-    expect(reads).not.toContain(path.join(root, '.wrkrs', 'config.yaml'))
-    expect(reads).not.toContain(path.join(root, '.claude', 'agents', 'wrkrs-product-manager.md'))
+    expectNoReadsThrough(reads, [])
+    expect(reads).not.toContain('.wrkrs/config.yaml')
+    expect(reads).not.toContain('.claude/agents/wrkrs-product-manager.md')
 
     const dry = await dryRunOutputs(root, fs)
     expect(dry.plan.blockers.map((blocker) => blocker.code)).toContain('PATH_TARGET_SYMLINK')

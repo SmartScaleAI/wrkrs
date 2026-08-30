@@ -1,7 +1,7 @@
-import type { JournalOperation, TransactionJournal } from '../core/ownership.js'
-import { FileSystemError, type FileSystemPort } from '../core/ports.js'
+import type { TransactionJournal } from '../core/ownership.js'
+import { ContainmentError, FileSystemError, type FileSystemPort } from '../core/ports.js'
 import { sha256 } from '../platform/hash.js'
-import { toSystemPath } from '../platform/paths.js'
+import { baseName, parentDirectory } from '../platform/paths.js'
 import { withOperation } from './journal.js'
 
 export interface RetainedPath {
@@ -11,25 +11,34 @@ export interface RetainedPath {
 
 export interface RollbackOutcome {
   readonly journal: TransactionJournal
-  /** Every exact path that still exists and could not be proven safe to remove. */
+  /** Every exact path that still exists (or cannot be proven absent) after rollback. */
   readonly retained: readonly RetainedPath[]
 }
 
 function describe(error: unknown): string {
+  if (error instanceof ContainmentError) return `${error.code}: ${error.message}; not touched`
   if (error instanceof FileSystemError) return `${error.code} while removing the path`
   return error instanceof Error ? error.name : String(error)
 }
 
+/** A missing ancestor proves the path itself is absent. */
+function ancestorMissing(error: unknown): boolean {
+  return error instanceof ContainmentError && error.code === 'PATH_ANCESTOR_MISSING'
+}
+
 /**
  * Reverses completed operations in reverse order and then verifies the
- * result. A file is deleted only when its current hash still equals the hash
- * wrkrs recorded before publication; anything else (external content, a
- * later modification, a non-regular file) is retained and reported by exact
- * path so a rollback can never destroy work wrkrs did not create.
+ * result. Every removal is performed inside the bound parent directory, so a
+ * changed ancestor makes the removal fail closed instead of reaching outside
+ * the repository. A file is deleted only when its current hash still equals
+ * the hash wrkrs recorded before publication; anything else (external
+ * content, a later modification, a non-regular file, an unbindable parent)
+ * is retained and reported by exact path.
  *
  * The in-memory journal is authoritative: it records publication before any
- * attempt to persist that fact, so a journal write failure cannot make a
- * published target invisible to reconciliation.
+ * attempt to persist that fact, and keeps the staging path until staging
+ * cleanup is verified, so neither a journal write failure nor a cleanup
+ * failure can hide a name wrkrs created.
  */
 export async function rollbackTransaction(input: {
   root: string
@@ -40,6 +49,7 @@ export async function rollbackTransaction(input: {
   const { root, fs } = input
   let journal = input.journal
   const retained = new Map<string, string>()
+  const touchedDirectories = new Set<string>()
 
   const retain = (path: string, reason: string): void => {
     if (!retained.has(path)) retained.set(path, reason)
@@ -61,29 +71,34 @@ export async function rollbackTransaction(input: {
     expectedHash: string | null,
     what: string,
   ): Promise<'removed' | 'absent' | 'retained'> => {
-    const systemPath = toSystemPath(root, relativePath)
+    const directory = parentDirectory(relativePath) ?? ''
+    const name = baseName(relativePath)
     try {
-      const stat = await fs.lstat(systemPath)
-      if (!stat) return 'absent'
-      if (stat.kind !== 'file') {
-        retain(relativePath, `${what} is now a ${stat.kind}; not removed`)
-        return 'retained'
-      }
-      if (expectedHash === null) {
-        retain(relativePath, `${what} has no recorded hash; not removed`)
-        return 'retained'
-      }
-      const currentHash = sha256(await fs.readFile(systemPath))
-      if (currentHash !== expectedHash) {
-        retain(
-          relativePath,
-          `${what} differs from what wrkrs wrote; the external change is preserved`,
-        )
-        return 'retained'
-      }
-      await fs.unlink(systemPath)
-      return 'removed'
+      return await fs.withinDirectory(root, directory, async (bound) => {
+        const stat = await bound.lstat(name)
+        if (!stat) return 'absent'
+        if (stat.kind !== 'file') {
+          retain(relativePath, `${what} is now a ${stat.kind}; not removed`)
+          return 'retained'
+        }
+        if (expectedHash === null) {
+          retain(relativePath, `${what} has no recorded hash; not removed`)
+          return 'retained'
+        }
+        const currentHash = sha256(await bound.readFile(name))
+        if (currentHash !== expectedHash) {
+          retain(
+            relativePath,
+            `${what} differs from what wrkrs wrote; the external change is preserved`,
+          )
+          return 'retained'
+        }
+        await bound.unlink(name)
+        touchedDirectories.add(directory)
+        return 'removed'
+      })
     } catch (error) {
+      if (ancestorMissing(error)) return 'absent'
       retain(relativePath, describe(error))
       return 'retained'
     }
@@ -95,14 +110,19 @@ export async function rollbackTransaction(input: {
     if (operation.status === 'reverted' || operation.status === 'retained') continue
 
     if (operation.kind === 'create-directory') {
-      const systemPath = toSystemPath(root, operation.path)
+      const directory = parentDirectory(operation.path) ?? ''
+      const name = baseName(operation.path)
       try {
-        await fs.removeDirectory(systemPath)
+        await fs.withinDirectory(root, directory, (bound) => bound.removeDirectory(name))
+        touchedDirectories.add(directory)
         await save(
           withOperation(journal, operation.path, { status: 'reverted', note: 'directory removed' }),
         )
       } catch (error) {
-        if (error instanceof FileSystemError && error.code === 'ENOENT') {
+        if (
+          (error instanceof FileSystemError && error.code === 'ENOENT') ||
+          ancestorMissing(error)
+        ) {
           await save(
             withOperation(journal, operation.path, { status: 'reverted', note: 'already absent' }),
           )
@@ -143,8 +163,18 @@ export async function rollbackTransaction(input: {
     )
   }
 
+  // Best-effort durability for the removals themselves.
+  for (const directory of touchedDirectories) {
+    try {
+      await fs.withinDirectory(root, directory, (bound) => bound.sync())
+    } catch {
+      // A failed sync cannot make a removed entry reappear; verification below is authoritative.
+    }
+  }
+
   // Verification pass: every path this transaction may have created must be
-  // gone, whatever the loop above believed.
+  // proven absent, whatever the loop above believed. A path that cannot be
+  // inspected inside its bound parent is retained (fail closed).
   for (const operation of input.journal.operations) {
     if (operation.status === 'planned') continue
     const paths: string[] = []
@@ -158,8 +188,15 @@ export async function rollbackTransaction(input: {
     }
     for (const path of paths) {
       if (retained.has(path)) continue
-      const stat = await fs.lstat(toSystemPath(root, path)).catch(() => null)
-      if (stat) retain(path, `${stat.kind} still present after rollback`)
+      const directory = parentDirectory(path) ?? ''
+      const name = baseName(path)
+      try {
+        const stat = await fs.withinDirectory(root, directory, (bound) => bound.lstat(name))
+        if (stat) retain(path, `${stat.kind} still present after rollback`)
+      } catch (error) {
+        if (ancestorMissing(error)) continue
+        retain(path, `could not verify removal (${describe(error)})`)
+      }
     }
   }
 
@@ -169,8 +206,4 @@ export async function rollbackTransaction(input: {
       .map(([path, reason]) => ({ path, reason }))
       .sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0)),
   }
-}
-
-export function operationReachedDisk(operation: JournalOperation): boolean {
-  return operation.status !== 'planned'
 }

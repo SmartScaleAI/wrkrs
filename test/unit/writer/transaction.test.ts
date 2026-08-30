@@ -94,11 +94,13 @@ describe('transactional apply', () => {
     const root = repo()
     const inner = createTestPorts().fs
     const fs = interceptFileSystem(inner, {
-      writeFileExclusive: async (args, next) => {
-        if (args[0].endsWith('.lock')) {
-          await next(args[0], new TextEncoder().encode('{"transactionId":"competitor"}\n'), 0o644)
-        }
-        return next(...args)
+      bound: {
+        writeFileExclusive: async (args, next) => {
+          if (args[0] === '.lock') {
+            await next('.lock', new TextEncoder().encode('{"transactionId":"competitor"}\n'), 0o644)
+          }
+          return next(...args)
+        },
       },
     })
     const ports = createTestPorts({ fs })
@@ -134,12 +136,14 @@ describe('transactional apply', () => {
     const before = hashTree(root)
     let writes = 0
     const fs = interceptFileSystem(createTestPorts().fs, {
-      writeFileExclusive: async (args, next) => {
-        if (args[0].includes('wrkrs-qa-engineer')) {
-          throw new Error('injected disk failure')
-        }
-        writes += 1
-        return next(...args)
+      bound: {
+        writeFileExclusive: async (args, next) => {
+          if (args[0].includes('wrkrs-qa-engineer')) {
+            throw new Error('injected disk failure')
+          }
+          writes += 1
+          return next(...args)
+        },
       },
     })
     const ports = createTestPorts({ fs })
@@ -157,9 +161,16 @@ describe('transactional apply', () => {
     const root = repo()
     const before = hashTree(root)
     const fs = interceptFileSystem(createTestPorts().fs, {
-      publishFileExclusive: async (args, next) => {
-        await next(...args)
-        if (args[1].endsWith('schema.json')) appendFileSync(args[1], '/* corrupted */')
+      bound: {
+        linkExclusive: async (args, next, directory) => {
+          await next(...args)
+          if (args[1] === 'schema.json') {
+            appendFileSync(
+              path.join(root, ...directory.relativePath.split('/'), args[1]),
+              '/* corrupted */',
+            )
+          }
+        },
       },
     })
     const ports = createTestPorts({ fs })
@@ -211,12 +222,14 @@ describe('transactional apply', () => {
     const root = repo()
     const edited = path.join(root, '.claude', 'agents', 'wrkrs-product-designer.md')
     const fs = interceptFileSystem(createTestPorts().fs, {
-      writeFileExclusive: async (args, next) => {
-        if (args[0].includes('wrkrs-qa-engineer')) {
-          appendFileSync(edited, '\nExternal edit made while wrkrs was running.\n')
-          throw new Error('injected failure after external edit')
-        }
-        return next(...args)
+      bound: {
+        writeFileExclusive: async (args, next) => {
+          if (args[0].includes('wrkrs-qa-engineer')) {
+            appendFileSync(edited, '\nExternal edit made while wrkrs was running.\n')
+            throw new Error('injected failure after external edit')
+          }
+          return next(...args)
+        },
       },
     })
     const ports = createTestPorts({ fs })

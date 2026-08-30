@@ -1,4 +1,4 @@
-import { hasErrors, type Diagnostic } from '../core/diagnostics.js'
+import { createDiagnostic, hasErrors, type Diagnostic } from '../core/diagnostics.js'
 import {
   JOURNAL_PATH,
   LOCK_PATH,
@@ -8,6 +8,8 @@ import {
 } from '../core/ownership.js'
 import type { Conflict, InstallPlan, PlanOperation } from '../core/plan.js'
 import {
+  AtomicPublicationUnsupportedError,
+  ContainmentError,
   FileSystemError,
   type ClockPort,
   type EnvironmentPort,
@@ -16,15 +18,17 @@ import {
 } from '../core/ports.js'
 import { formatTimestamp } from '../platform/clock.js'
 import { sha256 } from '../platform/hash.js'
-import { ancestorDirectories, baseName, parentDirectory, toSystemPath } from '../platform/paths.js'
+import { ancestorDirectories, baseName, parentDirectory } from '../platform/paths.js'
 import { conflict } from '../planner/conflicts.js'
 import { MANIFEST_SOURCE_ID } from '../planner/digest.js'
 import { GENERATED_DIRECTORY_MODE } from '../planner/operations.js'
 import {
   createJournal,
-  journalStagingPath,
+  journalStagingName,
+  JOURNAL_FILE_NAME,
   persistJournal,
   plannedOperation,
+  withDurability,
   withOperation,
   withStatus,
 } from './journal.js'
@@ -57,7 +61,7 @@ export type ApplyResult =
       readonly status: 'rolled-back'
       readonly transactionId: string
       readonly failure: string
-      /** Stable conflict when the failure was a precondition (for example a target that appeared). */
+      /** Stable conflict when the failure was a precondition or environment limit. */
       readonly conflict: Conflict | null
       readonly diagnostics: readonly Diagnostic[]
     }
@@ -85,6 +89,9 @@ class TransactionFailure extends Error {
   }
 }
 
+const LOCK_FILE_NAME = baseName(LOCK_PATH)
+const REPLAN = 'Run `wrkrs init --dry-run` again and review the new plan'
+
 function orderedCreates(plan: InstallPlan): PlanOperation[] {
   const creates = plan.operations.filter((operation) => operation.outcome === 'create')
   const manifest = creates.filter((operation) => operation.sourceId === MANIFEST_SOURCE_ID)
@@ -94,46 +101,55 @@ function orderedCreates(plan: InstallPlan): PlanOperation[] {
   return [...others, ...manifest]
 }
 
-function stagingPathFor(path: string, transactionId: string): string {
-  const parent = parentDirectory(path)
-  const name = `.${baseName(path)}.wrkrs-${transactionId.slice(0, 8)}.tmp`
-  return parent === null ? name : `${parent}/${name}`
-}
-
-async function safeUnlink(fs: FileSystemPort, systemPath: string): Promise<boolean> {
-  try {
-    await fs.unlink(systemPath)
-    return true
-  } catch (error) {
-    if (error instanceof FileSystemError && error.code === 'ENOENT') return true
-    return false
-  }
-}
-
-async function isAbsent(fs: FileSystemPort, systemPath: string): Promise<boolean> {
-  try {
-    return (await fs.lstat(systemPath)) === null
-  } catch {
-    return false
-  }
+function stagingNameFor(path: string, transactionId: string): string {
+  return `.${baseName(path)}.wrkrs-${transactionId.slice(0, 8)}.tmp`
 }
 
 function describeFailure(error: unknown): string {
   if (error instanceof TransactionFailure) return error.message
+  if (error instanceof ContainmentError) return `${error.code}: ${error.message}`
+  if (error instanceof AtomicPublicationUnsupportedError) return error.message
   if (error instanceof FileSystemError) return `${error.code} at ${error.path}`
   return error instanceof Error ? `${error.name}: ${error.message}` : String(error)
+}
+
+/** Turns a low-level failure raised while operating on `path` into a stable conflict where one applies. */
+function conflictFor(error: unknown, path: string): Conflict | null {
+  if (error instanceof ContainmentError) {
+    return conflict(
+      'PATH',
+      'PATH_ANCESTOR_CHANGED',
+      path,
+      `Parent directory "${error.ancestor ?? error.directory}" changed during apply (${error.code}); nothing was read, written, or removed outside the repository`,
+      REPLAN,
+    )
+  }
+  if (error instanceof AtomicPublicationUnsupportedError) {
+    return conflict(
+      'ENVIRONMENT',
+      'ENVIRONMENT_ATOMIC_PUBLICATION_UNSUPPORTED',
+      path,
+      'The filesystem holding the repository cannot create hard links, so wrkrs cannot publish files atomically without replacing existing entries',
+      'Move the repository to a filesystem that supports hard links (for example APFS, ext4, or NTFS) and run `wrkrs init` again',
+    )
+  }
+  return null
 }
 
 /**
  * Applies a validated, unblocked plan through a journaled transaction:
  * lock, recheck, staged writes in deterministic order, atomic no-replace
- * publication, post-publication hash verification, validation, and
- * hash-guarded reverse rollback on any failure.
+ * publication, separate verified staging cleanup, post-publication hash
+ * verification, validation, and hash-guarded reverse rollback on any failure.
  *
- * Journal state is advanced in memory before each attempt to persist it, so
- * a persistence failure can never hide a published target from rollback, and
- * every journal write replaces the file atomically so the previous record
- * survives a failed write.
+ * Every filesystem step runs inside a bound parent directory
+ * (FileSystemPort.withinDirectory), so a symlinked or swapped ancestor makes
+ * the step fail closed rather than touch anything outside the repository.
+ *
+ * Journal state is advanced in memory before each attempt to persist it and
+ * before each fallible cleanup, so neither a persistence failure nor a
+ * staging-cleanup failure can hide a name wrkrs created, and every journal
+ * write replaces the file atomically so the previous record survives.
  */
 export async function applyPlan(input: ApplyInput, ports: WriterPorts): Promise<ApplyResult> {
   const { plan } = input
@@ -154,22 +170,50 @@ export async function applyPlan(input: ApplyInput, ports: WriterPorts): Promise<
     }
   }
 
-  const journalSystemPath = toSystemPath(root, JOURNAL_PATH)
-  const lockSystemPath = toSystemPath(root, LOCK_PATH)
-  const wrkrsSystemPath = toSystemPath(root, WRKRS_DIRECTORY)
+  const inDirectory = <T>(
+    directory: string,
+    operation: Parameters<FileSystemPort['withinDirectory']>[2] extends (
+      d: infer D,
+    ) => Promise<unknown>
+      ? (bound: D) => Promise<T>
+      : never,
+  ): Promise<T> => fs.withinDirectory(root, directory, operation)
 
-  if (await fs.lstat(journalSystemPath)) {
-    return {
-      status: 'aborted',
-      conflicts: [
-        conflict(
-          'OWNERSHIP',
-          'OWNERSHIP_TRANSACTION_INTERRUPTED',
-          JOURNAL_PATH,
-          'An interrupted wrkrs transaction journal is present',
-          'Resolve the journal before retrying',
-        ),
-      ],
+  try {
+    const journalStat = await inDirectory(WRKRS_DIRECTORY, (bound) =>
+      bound.lstat(JOURNAL_FILE_NAME),
+    )
+    if (journalStat) {
+      return {
+        status: 'aborted',
+        conflicts: [
+          conflict(
+            'OWNERSHIP',
+            'OWNERSHIP_TRANSACTION_INTERRUPTED',
+            JOURNAL_PATH,
+            'An interrupted wrkrs transaction journal is present',
+            'Resolve the journal before retrying',
+          ),
+        ],
+      }
+    }
+  } catch (error) {
+    if (!(error instanceof ContainmentError && error.code === 'PATH_ANCESTOR_MISSING')) {
+      const found = conflictFor(error, JOURNAL_PATH)
+      return {
+        status: 'aborted',
+        conflicts: found
+          ? [found]
+          : [
+              conflict(
+                'PRECONDITION',
+                'PRECONDITION_TARGET_CHANGED',
+                WRKRS_DIRECTORY,
+                describeFailure(error),
+                REPLAN,
+              ),
+            ],
+      }
     }
   }
 
@@ -178,13 +222,33 @@ export async function applyPlan(input: ApplyInput, ports: WriterPorts): Promise<
 
   const transactionId = ids.uuid()
   const startedAt = formatTimestamp(clock.now())
-  const journalTempSystemPath = journalStagingPath(journalSystemPath, transactionId)
+  const journalTempName = journalStagingName(transactionId)
 
   // The lock lives inside .wrkrs, so that directory is the one piece of
   // bookkeeping that may exist before the lock is held. It is a planned
   // created directory and is removed again on any abort or complete rollback.
   let wrkrsCreated = false
-  if (!(await fs.lstat(wrkrsSystemPath))) {
+  let wrkrsPresent: boolean
+  try {
+    wrkrsPresent = (await inDirectory('', (bound) => bound.lstat(WRKRS_DIRECTORY))) !== null
+  } catch (error) {
+    const found = conflictFor(error, WRKRS_DIRECTORY)
+    return {
+      status: 'aborted',
+      conflicts: found
+        ? [found]
+        : [
+            conflict(
+              'PRECONDITION',
+              'PRECONDITION_TARGET_CHANGED',
+              WRKRS_DIRECTORY,
+              describeFailure(error),
+              REPLAN,
+            ),
+          ],
+    }
+  }
+  if (!wrkrsPresent) {
     if (!plan.createdDirectories.includes(WRKRS_DIRECTORY)) {
       return {
         status: 'aborted',
@@ -194,39 +258,63 @@ export async function applyPlan(input: ApplyInput, ports: WriterPorts): Promise<
             'PRECONDITION_DIRECTORY_MISSING',
             WRKRS_DIRECTORY,
             '.wrkrs is absent but the plan did not expect to create it',
-            'Run `wrkrs init --dry-run` again',
+            REPLAN,
           ),
         ],
       }
     }
     try {
-      await fs.makeDirectory(wrkrsSystemPath, GENERATED_DIRECTORY_MODE)
+      await inDirectory('', (bound) =>
+        bound.makeDirectory(WRKRS_DIRECTORY, GENERATED_DIRECTORY_MODE),
+      )
     } catch (error) {
+      const found = conflictFor(error, WRKRS_DIRECTORY)
       return {
         status: 'aborted',
         conflicts: [
-          conflict(
-            'PRECONDITION',
-            'PRECONDITION_TARGET_CHANGED',
-            WRKRS_DIRECTORY,
-            `Could not create .wrkrs (${describeFailure(error)})`,
-            'Run `wrkrs init --dry-run` again',
-          ),
+          found ??
+            conflict(
+              'PRECONDITION',
+              'PRECONDITION_TARGET_CHANGED',
+              WRKRS_DIRECTORY,
+              `Could not create .wrkrs (${describeFailure(error)})`,
+              REPLAN,
+            ),
         ],
       }
     }
     wrkrsCreated = true
   }
 
+  /** Removes bookkeeping; returns the paths that could not be removed. */
   const releaseBookkeeping = async (): Promise<string[]> => {
     const remaining: string[] = []
-    if (!(await safeUnlink(fs, journalTempSystemPath)))
-      remaining.push(`${JOURNAL_PATH} (temporary)`)
-    if (!(await safeUnlink(fs, journalSystemPath))) remaining.push(JOURNAL_PATH)
-    if (!(await safeUnlink(fs, lockSystemPath))) remaining.push(LOCK_PATH)
+    try {
+      await inDirectory(WRKRS_DIRECTORY, async (bound) => {
+        for (const [name, path] of [
+          [journalTempName, `${JOURNAL_PATH} (temporary)`],
+          [JOURNAL_FILE_NAME, JOURNAL_PATH],
+          [LOCK_FILE_NAME, LOCK_PATH],
+        ] as const) {
+          try {
+            await bound.unlink(name)
+          } catch (error) {
+            if (!(error instanceof FileSystemError && error.code === 'ENOENT')) remaining.push(path)
+          }
+        }
+        await bound.sync().catch(() => 'unsupported' as const)
+      })
+    } catch (error) {
+      if (!(error instanceof ContainmentError && error.code === 'PATH_ANCESTOR_MISSING')) {
+        remaining.push(JOURNAL_PATH, LOCK_PATH)
+      }
+    }
     if (wrkrsCreated) {
       try {
-        await fs.removeDirectory(wrkrsSystemPath)
+        await inDirectory('', async (bound) => {
+          await bound.removeDirectory(WRKRS_DIRECTORY)
+          await bound.sync().catch(() => 'unsupported' as const)
+        })
       } catch (error) {
         if (!(error instanceof FileSystemError && error.code === 'ENOENT')) {
           remaining.push(WRKRS_DIRECTORY)
@@ -242,22 +330,30 @@ export async function applyPlan(input: ApplyInput, ports: WriterPorts): Promise<
     2,
   )
   try {
-    await fs.writeFileExclusive(lockSystemPath, new TextEncoder().encode(lockContent + '\n'), 0o644)
+    await inDirectory(WRKRS_DIRECTORY, (bound) =>
+      bound.writeFileExclusive(LOCK_FILE_NAME, new TextEncoder().encode(lockContent + '\n'), 0o644),
+    )
   } catch (error) {
-    if (wrkrsCreated) await fs.removeDirectory(wrkrsSystemPath).catch(() => undefined)
+    if (wrkrsCreated) {
+      await inDirectory('', (bound) => bound.removeDirectory(WRKRS_DIRECTORY)).catch(
+        () => undefined,
+      )
+    }
     const code = error instanceof FileSystemError ? error.code : 'EUNKNOWN'
+    const found = conflictFor(error, LOCK_PATH)
     return {
       status: 'aborted',
       conflicts: [
-        conflict(
-          'OWNERSHIP',
-          code === 'EEXIST' ? 'OWNERSHIP_LOCK_PRESENT' : 'OWNERSHIP_LOCK_FAILED',
-          LOCK_PATH,
-          code === 'EEXIST'
-            ? 'Another wrkrs installation holds the lock'
-            : `Could not acquire the installation lock (${code})`,
-          'Ensure no other wrkrs process is running, then remove a stale lock file and retry',
-        ),
+        found ??
+          conflict(
+            'OWNERSHIP',
+            code === 'EEXIST' ? 'OWNERSHIP_LOCK_PRESENT' : 'OWNERSHIP_LOCK_FAILED',
+            LOCK_PATH,
+            code === 'EEXIST'
+              ? 'Another wrkrs installation holds the lock'
+              : `Could not acquire the installation lock (${code})`,
+            'Ensure no other wrkrs process is running, then remove a stale lock file and retry',
+          ),
       ],
     }
   }
@@ -285,7 +381,7 @@ export async function applyPlan(input: ApplyInput, ports: WriterPorts): Promise<
     startedAt,
     operations: journalOperations,
   })
-  const persist = (next: TransactionJournal) => persistJournal(fs, journalSystemPath, next, clock)
+  const persist = (next: TransactionJournal) => persistJournal(fs, root, next, clock)
 
   try {
     journal = await persist(journal)
@@ -296,7 +392,7 @@ export async function applyPlan(input: ApplyInput, ports: WriterPorts): Promise<
         status: 'rollback-incomplete',
         transactionId,
         failure: `Could not write the transaction journal (${describeFailure(error)})`,
-        conflict: null,
+        conflict: conflictFor(error, JOURNAL_PATH),
         retained: remaining.map((path) => ({ path, reason: 'bookkeeping could not be removed' })),
         journalPath: JOURNAL_PATH,
         diagnostics: [],
@@ -305,13 +401,14 @@ export async function applyPlan(input: ApplyInput, ports: WriterPorts): Promise<
     return {
       status: 'aborted',
       conflicts: [
-        conflict(
-          'PRECONDITION',
-          'PRECONDITION_JOURNAL_UNWRITABLE',
-          JOURNAL_PATH,
-          `Could not write the transaction journal (${describeFailure(error)})`,
-          'Check filesystem permissions and retry',
-        ),
+        conflictFor(error, JOURNAL_PATH) ??
+          conflict(
+            'PRECONDITION',
+            'PRECONDITION_JOURNAL_UNWRITABLE',
+            JOURNAL_PATH,
+            `Could not write the transaction journal (${describeFailure(error)})`,
+            'Check filesystem permissions and retry',
+          ),
       ],
     }
   }
@@ -335,36 +432,52 @@ export async function applyPlan(input: ApplyInput, ports: WriterPorts): Promise<
     journal = await persist(journal)
   }
 
+  const syncDirectory = async (directory: string): Promise<void> => {
+    const sync = await inDirectory(directory, (bound) => bound.sync())
+    journal = withDurability(journal, sync)
+  }
+
+  let failingPath: string | null = null
+
   try {
     await advance(withStatus(journal, 'applying'))
 
     for (const operation of creates) {
       for (const ancestor of ancestorDirectories(operation.path)) {
         if (!plan.createdDirectories.includes(ancestor) || created.has(ancestor)) continue
-        await fs.makeDirectory(toSystemPath(root, ancestor), GENERATED_DIRECTORY_MODE)
+        failingPath = ancestor
+        const parent = parentDirectory(ancestor) ?? ''
+        await inDirectory(parent, (bound) =>
+          bound.makeDirectory(baseName(ancestor), GENERATED_DIRECTORY_MODE),
+        )
         created.add(ancestor)
         createdDirectories.push(ancestor)
-        await advance(withOperation(journal, ancestor, { status: 'applied' }))
+        journal = withOperation(journal, ancestor, { status: 'applied' })
+        await syncDirectory(parent)
+        await advance(journal)
       }
 
+      failingPath = operation.path
       const bytes = operation.proposedBytes
       if (!bytes || operation.proposedHash === null || operation.mode === null) {
         throw new TransactionFailure(`Operation for ${operation.path} carries no content`)
       }
       const expectedHash = operation.proposedHash
-      const stagingPath = stagingPathFor(operation.path, transactionId)
-      const stagingSystemPath = toSystemPath(root, stagingPath)
-      const targetSystemPath = toSystemPath(root, operation.path)
+      const directory = parentDirectory(operation.path) ?? ''
+      const targetName = baseName(operation.path)
+      const stagingName = stagingNameFor(operation.path, transactionId)
+      const stagingPath = directory === '' ? stagingName : `${directory}/${stagingName}`
+      const mode = operation.mode
 
-      // 1. Stage: full content written and synced under a temporary name.
-      await fs.writeFileExclusive(stagingSystemPath, bytes, operation.mode)
+      // 1. Stage: full content written and fsynced under a temporary name in the bound directory.
+      await inDirectory(directory, (bound) => bound.writeFileExclusive(stagingName, bytes, mode))
       await advance(
         withOperation(journal, operation.path, { status: 'staged', stagingPath, expectedHash }),
       )
 
-      // 2. Publish atomically without ever replacing an existing entry.
+      // 2. Publish: create the target name atomically; never replace an existing entry.
       try {
-        await fs.publishFileExclusive(stagingSystemPath, targetSystemPath)
+        await inDirectory(directory, (bound) => bound.linkExclusive(stagingName, targetName))
       } catch (error) {
         if (error instanceof FileSystemError && error.code === 'EEXIST') {
           journal = withOperation(journal, operation.path, {
@@ -385,11 +498,27 @@ export async function applyPlan(input: ApplyInput, ports: WriterPorts): Promise<
         }
         throw error
       }
-      journal = withOperation(journal, operation.path, { status: 'published', stagingPath: null })
+      // The target may now exist: record it before anything fallible happens.
+      journal = withOperation(journal, operation.path, { status: 'published' })
+      await syncDirectory(directory)
       await advance(journal)
 
-      // 3. Verify the published bytes.
-      const written = await fs.readFile(targetSystemPath)
+      // 3. Clean up the staging name and prove it is gone before dropping it from the journal.
+      await inDirectory(directory, async (bound) => {
+        try {
+          await bound.unlink(stagingName)
+        } catch (error) {
+          if (!(error instanceof FileSystemError && error.code === 'ENOENT')) throw error
+        }
+        if (await bound.lstat(stagingName)) {
+          throw new TransactionFailure(`Staging file for ${operation.path} could not be removed`)
+        }
+      })
+      journal = withOperation(journal, operation.path, { stagingPath: null })
+      await advance(journal)
+
+      // 4. Verify the published bytes through the bound directory.
+      const written = await inDirectory(directory, (bound) => bound.readFile(targetName))
       const appliedHash = sha256(written)
       if (appliedHash !== expectedHash) {
         throw new TransactionFailure(
@@ -400,6 +529,7 @@ export async function applyPlan(input: ApplyInput, ports: WriterPorts): Promise<
       journal = withOperation(journal, operation.path, { status: 'applied', appliedHash })
       await advance(journal)
     }
+    failingPath = null
 
     await advance(withStatus(journal, 'validating'))
     const diagnostics = [...(await input.validate({ transactionId }))]
@@ -412,25 +542,37 @@ export async function applyPlan(input: ApplyInput, ports: WriterPorts): Promise<
     }
 
     await advance(withStatus(journal, 'committed'))
-    const leftovers = await releaseBookkeeping()
-    if (leftovers.length > 0) {
-      // The installation is complete; leftover bookkeeping is reported by check.
+    if (journal.durability === 'best-effort') {
       diagnostics.push(
-        ...leftovers.map((path) => ({
-          code: 'TRANSACTION_BOOKKEEPING_RETAINED',
-          severity: 'warning' as const,
-          message: `Transaction bookkeeping could not be removed: ${path}`,
-          path,
-          remediation: 'Remove the file manually',
-          details: {},
-        })),
+        createDiagnostic(
+          'TRANSACTION_DURABILITY_BEST_EFFORT',
+          'warning',
+          'The filesystem could not sync directory entries; the installation is complete but a power loss before the operating system flushes its caches could revert it',
+          {
+            remediation: 'No action is required; re-run `wrkrs check` after an unexpected shutdown',
+          },
+        ),
+      )
+    }
+    const leftovers = await releaseBookkeeping()
+    for (const path of leftovers) {
+      diagnostics.push(
+        createDiagnostic(
+          'TRANSACTION_BOOKKEEPING_RETAINED',
+          'warning',
+          `Transaction bookkeeping could not be removed: ${path}`,
+          { path, remediation: 'Remove the file manually' },
+        ),
       )
     }
     return { status: 'applied', transactionId, appliedPaths, createdDirectories, diagnostics }
   } catch (error) {
     const failure = describeFailure(error)
     const diagnostics = error instanceof TransactionFailure ? error.diagnostics : []
-    const failureConflict = error instanceof TransactionFailure ? error.conflict : null
+    const failureConflict =
+      error instanceof TransactionFailure
+        ? error.conflict
+        : conflictFor(error, failingPath ?? WRKRS_DIRECTORY)
     try {
       journal = await persist(withStatus(journal, 'rolling-back', failure))
     } catch {
@@ -452,8 +594,16 @@ export async function applyPlan(input: ApplyInput, ports: WriterPorts): Promise<
       // Final proof: every directory this transaction created must be gone.
       for (const directory of [...createdDirectories].reverse()) {
         if (retained.has(directory)) continue
-        if (!(await isAbsent(fs, toSystemPath(root, directory)))) {
-          retained.set(directory, 'directory still present after rollback')
+        const parent = parentDirectory(directory) ?? ''
+        try {
+          const stat = await inDirectory(parent, (bound) => bound.lstat(baseName(directory)))
+          if (stat) retained.set(directory, 'directory still present after rollback')
+        } catch (verifyError) {
+          if (!(
+            verifyError instanceof ContainmentError && verifyError.code === 'PATH_ANCESTOR_MISSING'
+          )) {
+            retained.set(directory, `could not verify removal (${describeFailure(verifyError)})`)
+          }
         }
       }
       if (retained.size === 0) {
@@ -472,8 +622,11 @@ export async function applyPlan(input: ApplyInput, ports: WriterPorts): Promise<
     } catch {
       // The retained paths are reported to the caller regardless.
     }
-    await safeUnlink(fs, journalTempSystemPath)
-    await safeUnlink(fs, lockSystemPath)
+    await inDirectory(WRKRS_DIRECTORY, async (bound) => {
+      for (const name of [journalTempName, LOCK_FILE_NAME]) {
+        await bound.unlink(name).catch(() => undefined)
+      }
+    }).catch(() => undefined)
     return {
       status: 'rollback-incomplete',
       transactionId,

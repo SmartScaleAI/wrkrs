@@ -89,6 +89,7 @@ export function applyResultToJson(result: ApplyResult): Record<string, JsonValue
         status: 'rolled-back',
         transactionId: result.transactionId,
         failure: result.failure,
+        conflict: result.conflict ? { ...result.conflict } : null,
         diagnostics: result.diagnostics.map((diagnostic) => ({
           ...diagnostic,
           details: { ...diagnostic.details },
@@ -99,6 +100,7 @@ export function applyResultToJson(result: ApplyResult): Record<string, JsonValue
         status: 'rollback-incomplete',
         transactionId: result.transactionId,
         failure: result.failure,
+        conflict: result.conflict ? { ...result.conflict } : null,
         retained: result.retained.map((item) => ({ ...item })),
         journalPath: result.journalPath,
         diagnostics: result.diagnostics.map((diagnostic) => ({

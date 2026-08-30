@@ -46,16 +46,20 @@ function failJournalWhen(
   let persistCount = 0
   let failed = 0
   const fs = interceptFileSystem(createTestPorts().fs, {
-    rename: async (args, next) => {
-      if (args[1].endsWith('.journal.json')) {
-        persistCount += 1
-        const pending = JSON.parse(readFileSync(args[0], 'utf8')) as JournalView
-        if (when(pending, persistCount) && (!options.once || failed === 0)) {
-          failed += 1
-          throw journalFailure()
+    bound: {
+      // Inside a bound operation the process working directory is the bound
+      // .wrkrs directory, so the staged journal can be read by its name.
+      rename: async (args, next) => {
+        if (args[1] === '.journal.json') {
+          persistCount += 1
+          const pending = JSON.parse(readFileSync(args[0], 'utf8')) as JournalView
+          if (when(pending, persistCount) && (!options.once || failed === 0)) {
+            failed += 1
+            throw journalFailure()
+          }
         }
-      }
-      return next(...args)
+        return next(...args)
+      },
     },
   })
   return { fs, failures: () => failed }
@@ -148,9 +152,11 @@ describe.each(FIXTURES)('journal persistence failures in %s', (fixture) => {
       (journal) => journal.status === 'rolling-back' || journal.status === 'rolled-back',
     )
     const fs = interceptFileSystem(journals.fs, {
-      writeFileExclusive: async (args, next) => {
-        if (args[0].includes('wrkrs-software-engineer')) throw new Error('injected write failure')
-        return next(...args)
+      bound: {
+        writeFileExclusive: async (args, next) => {
+          if (args[0].includes('wrkrs-software-engineer')) throw new Error('injected write failure')
+          return next(...args)
+        },
       },
     })
     const ports = createTestPorts({ fs })
@@ -167,15 +173,17 @@ describe.each(FIXTURES)('journal persistence failures in %s', (fixture) => {
   it('never reports rolled-back while a generated file remains, and names the exact file', async () => {
     const root = repo()
     const fs = interceptFileSystem(createTestPorts().fs, {
-      writeFileExclusive: async (args, next) => {
-        if (args[0].includes('wrkrs-software-engineer')) throw new Error('injected write failure')
-        return next(...args)
-      },
-      unlink: async (args, next) => {
-        if (args[0].endsWith(AGENT.split('/').join(path.sep))) {
-          throw new FileSystemError('EPERM', args[0], 'injected: cannot remove the agent')
-        }
-        return next(...args)
+      bound: {
+        writeFileExclusive: async (args, next) => {
+          if (args[0].includes('wrkrs-software-engineer')) throw new Error('injected write failure')
+          return next(...args)
+        },
+        unlink: async (args, next, directory) => {
+          if (directory.relativePath === '.claude/agents' && args[0] === 'wrkrs-qa-engineer.md') {
+            throw new FileSystemError('EPERM', args[0], 'injected: cannot remove the agent')
+          }
+          return next(...args)
+        },
       },
     })
     const ports = createTestPorts({ fs })
@@ -200,26 +208,28 @@ describe('journal durability', () => {
     const seen: string[] = []
     let sabotaged = false
     const fs = interceptFileSystem(createTestPorts().fs, {
-      writeFileExclusive: async (args, next) => {
-        if (args[0].includes('.journal.json') && args[0].endsWith('.tmp')) {
-          seen.push('staged')
-          const live = args[0].replace(/\.[0-9a-f]{8}\.tmp$/, '')
-          if (existsSync(live) && !sabotaged) {
-            sabotaged = true
-            const before = readFileSync(live, 'utf8')
-            try {
-              throw new FileSystemError(
-                'ENOSPC',
-                args[0],
-                'injected: no space for the staged journal',
-              )
-            } finally {
-              expect(readFileSync(live, 'utf8')).toBe(before)
+      bound: {
+        writeFileExclusive: async (args, next) => {
+          // Inside the bound .wrkrs directory the live journal is reachable by name.
+          if (args[0].startsWith('.journal.json.') && args[0].endsWith('.tmp')) {
+            seen.push('staged')
+            if (existsSync('.journal.json') && !sabotaged) {
+              sabotaged = true
+              const before = readFileSync('.journal.json', 'utf8')
+              try {
+                throw new FileSystemError(
+                  'ENOSPC',
+                  args[0],
+                  'injected: no space for the staged journal',
+                )
+              } finally {
+                expect(readFileSync('.journal.json', 'utf8')).toBe(before)
+              }
             }
           }
-        }
-        if (args[0].includes('.journal.json') && !args[0].endsWith('.tmp')) seen.push('direct')
-        return next(...args)
+          if (args[0] === '.journal.json') seen.push('direct')
+          return next(...args)
+        },
       },
     })
     const ports = createTestPorts({ fs })

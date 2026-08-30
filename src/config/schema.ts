@@ -108,6 +108,7 @@ export const journalSchemaV1 = z.strictObject({
     'rolled-back',
     'rollback-incomplete',
   ]),
+  durability: z.enum(['strict', 'best-effort']),
   operations: z.array(journalOperationSchema),
   failure: z.string().nullable(),
 })

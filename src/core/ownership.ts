@@ -66,6 +66,14 @@ export interface JournalOperation {
   readonly note: string | null
 }
 
+/**
+ * 'strict' when every transaction-critical directory entry was fsynced after
+ * being created, replaced, or removed; 'best-effort' when the platform could
+ * not sync a directory, in which case a power loss before the operating
+ * system flushes its caches may revert the most recent entries.
+ */
+export type TransactionDurability = 'strict' | 'best-effort'
+
 export interface TransactionJournal {
   readonly schemaVersion: 1
   readonly transactionId: string
@@ -74,6 +82,7 @@ export interface TransactionJournal {
   readonly startedAt: string
   readonly updatedAt: string
   readonly status: TransactionStatus
+  readonly durability: TransactionDurability
   readonly operations: readonly JournalOperation[]
   readonly failure: string | null
 }

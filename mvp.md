@@ -363,7 +363,7 @@ All four items were approved by the owner on 2026-08-29. The implementation repo
 
 ## First vertical slice implementation status
 
-Implemented on 2026-08-29, committed as a8e4a5ba567dc06a96868bf941b242a00e30df49 on the review branch review/mvp-vertical-slice, and pushed for independent review. The review remediation recorded in decisions.md A-016 is held as local changes on that branch pending owner review.
+Implemented on 2026-08-29, committed as a8e4a5ba567dc06a96868bf941b242a00e30df49 on the review branch review/mvp-vertical-slice, and pushed for independent review. The first review remediation (decisions.md A-016) was committed as baab7195004463c06ff3bc0aa1b8b765eb34df0b on that branch; the second review round (decisions.md A-017) follows it on the same branch.
 
 Acceptance test coverage:
 
@@ -390,4 +390,13 @@ Review remediation regression tests (decisions.md A-016):
 | Sanitized parser diagnostics for malformed config, manifest, and journal documents across parse, check, dry-run, human, JSON, and unexpected-error paths | test/unit/config/redaction.test.ts, test/integration/cli.test.ts, test/fixtures/malformed-documents |
 | Exact targets under bounded scans: more than 5,000 earlier entries, more than 500 components, a namespaced target and a case-only collision past the boundary, an incomplete listing | test/unit/planner/bounded-scan.test.ts |
 
-Deliberately deferred, unchanged from the approved scope: update, uninstall, shared-file structural edits, providers, and cross-platform CI.
+Second review round regression tests (decisions.md A-017):
+
+| Finding | Where |
+| --- | --- |
+| Separated publication and staging cleanup: staging unlink fails once or permanently, journal fails after publication with staging present, no rolled-back while either name exists, external targets identical | test/unit/writer/publication-lifecycle.test.ts, test/unit/writer/publication.test.ts |
+| Atomic publication without a copy fallback: unsupported hard links never invoke copyFile or create the target, controlled environment conflict, tree restored, existing targets never replaced, hard-link path atomic | test/unit/writer/atomic-publication.test.ts |
+| Containment bound to I/O: ancestor swapped between scanner reads, after preconditions, before publication, and before rollback; outside tree byte- and mode-identical; outputs redacted; fixtures still install | test/unit/writer/containment-race.test.ts, test/unit/repository/containment.test.ts |
+| Journal durability: temp bytes fsynced before rename, live journal replaced only by rename, directory synced after rename, sync failure before and after publication, best-effort reporting, no rolled-back without verification | test/unit/writer/journal-durability.test.ts, test/unit/writer/journal-failures.test.ts |
+
+Deliberately deferred, unchanged from the approved scope: update, uninstall, shared-file structural edits, providers, and cross-platform CI. Verified on macOS with Node 22.23.2 and 24.18.1; Linux and Windows remain unverified.

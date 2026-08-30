@@ -415,6 +415,30 @@ Rationale:
 
 - Each finding described a way an already-promised invariant (no overwrite, provable rollback, no reads outside the worktree, no secret leakage, exact dry run) could be violated under a race, a crash, a symlink, a malformed file, or a large tree. The corrections make the invariants hold by construction and are proven by fault-injection tests.
 
+### A-017: Second review round: bound I/O, separated publication lifecycle, durable journal
+
+Status: Proposed  
+Date: 2026-08-30
+
+An independent review of commit baab7195004463c06ff3bc0aa1b8b765eb34df0b confirmed four remaining findings: publication and staging cleanup were one fallible step, publication could silently fall back to a non-atomic copy, containment was checked by pathname and cached rather than bound to each operation, and journal replacement did not sync the containing directory. The corrections below were implemented on review/mvp-vertical-slice and are recorded for owner review. Scope is unchanged.
+
+Decision:
+
+- Port contract. `FileSystemPort` now exposes only `lstat`, `realpath`, and `withinDirectory(root, directory, operation)`; the path-based read, write, rename, unlink, mkdir, rmdir, and `publishFileExclusive` methods were removed so no repository I/O can bypass containment. `withinDirectory` binds the directory and passes a `BoundDirectory` with name-relative `lstat`, `readFile`, `readDirectory`, `writeFileExclusive`, `linkExclusive`, `unlink`, `rename`, `makeDirectory`, `removeDirectory`, and `sync`. Binding failures raise `ContainmentError` (`PATH_ROOT_INVALID`, `PATH_ANCESTOR_MISSING`, `PATH_ANCESTOR_SYMLINK`, `PATH_ANCESTOR_NOT_A_DIRECTORY`, `PATH_ANCESTOR_CHANGED`, `PATH_ENTRY_CHANGED`); an unsupported hard link raises `AtomicPublicationUnsupportedError`.
+- Binding mechanism. The Node port walks each segment with lstat, enters it with `process.chdir`, and verifies the entered directory's device and inode against the lstat result; operations then use relative names, with O_NOFOLLOW and a handle-identity check for reads and O_EXCL plus O_NOFOLLOW for creates. Node has no `openat` family, so the process working directory is the only portable descriptor-bound anchor; the port serializes calls, rejects nesting, and restores the previous working directory after every operation. Consequence: contained operations must not run concurrently in one process and cannot run in worker threads (Vitest is pinned to the forks pool).
+- Publication lifecycle. planned, staged (staging path and expected hash persisted), published (target name created by hard link; staging path retained in the journal until its removal is verified), applied (target re-read and hash-verified). The in-memory journal reflects publication before the directory sync, the journal persist, and the staging cleanup. Rollback reconciles staging and target names by recorded hash inside their bound parent, treats a missing ancestor as proof of absence, retains anything it cannot prove, and returns rolled-back only when every created name is proven absent.
+- No copy fallback. `linkExclusive` maps EPERM, ENOTSUP, EOPNOTSUPP, ENOSYS, EXDEV, and EMLINK to `AtomicPublicationUnsupportedError`; the transaction reports `ENVIRONMENT_ATOMIC_PUBLICATION_UNSUPPORTED` (family ENVIRONMENT) with a controlled message and rolls back. Atomicity is claimed only for hard-link publication on filesystems that support it.
+- Durability guarantee. The journal is replaced by write-temp (O_EXCL), fsync, rename, then fsync of the `.wrkrs` directory; publication, directory creation, and rollback removals are followed by an fsync of the containing directory. The journal records `durability: strict` when every sync succeeded and `best-effort` when the platform reported directory syncing unsupported (EISDIR, EPERM, EINVAL, ENOTSUP, EOPNOTSUPP, EBADF, EACCES, ENOSYS), in which case the apply result carries `TRANSACTION_DURABILITY_BEST_EFFORT`; any other sync error is a transaction failure. Strict durability means: once a journal state or a published entry is reported, it survives a power loss on filesystems that require directory fsync. Journal schema change: `durability` is a required field (transient bookkeeping; no migration).
+- New stable codes: `ENVIRONMENT_ATOMIC_PUBLICATION_UNSUPPORTED`, `PATH_ANCESTOR_CHANGED`, `TRANSACTION_DURABILITY_BEST_EFFORT`; reader failure codes `PATH_ANCESTOR_CHANGED` and `PATH_ENTRY_CHANGED`. Rolled-back and rollback-incomplete results now carry the stable `conflict` in human and JSON output.
+- Verification status. Verified on macOS with Node 22.23.2 and 24.18.1 only. Linux and Windows are unverified. On Windows the working directory is tracked by path rather than by handle, so the chdir binding does not provide descriptor-level protection there; the per-segment lstat and identity checks still apply, and directory fsync is expected to report unsupported. Fallback and crash-recovery behavior beyond the fault-injection tests has not been exercised.
+
+Rationale:
+
+- Pre-checking a path and then operating on it by name leaves a window a concurrent ancestor swap can exploit; binding the directory and operating by relative name closes that window on POSIX with approved Node built-ins and no native dependency.
+- Separating target creation from staging cleanup, and recording publication before any fallible step, makes the journal a truthful record at every instant.
+- A non-atomic copy would let another process observe a half-written generated file; failing closed keeps the "exact bytes or nothing" promise.
+- Directory fsync is what makes a renamed journal entry durable on filesystems such as ext4; without it the recovery record can vanish after a power loss.
+
 ## Deferred decisions
 
 ### D-001: Exact provider authentication and capability mappings
@@ -460,4 +484,4 @@ Vertical slice approval: Approved by the owner on 2026-08-29
 Production dependency approval: Approved by the owner on 2026-08-29 (commander, zod, yaml)  
 Implementation repository selection: Approved by the owner on 2026-08-29 (github.com/SmartScaleAI/wrkrs, public, MIT)
 
-Implementation status: the first vertical slice was implemented on 2026-08-29, committed as a8e4a5ba567dc06a96868bf941b242a00e30df49 on review/mvp-vertical-slice, and pushed to origin for independent review; the remote's default branch main also points at that commit. The review remediation (A-016) is held as uncommitted local changes on review/mvp-vertical-slice pending owner review. No pull request, npm publication, deployment, merge, or release has occurred.
+Implementation status: the first vertical slice was implemented on 2026-08-29, committed as a8e4a5ba567dc06a96868bf941b242a00e30df49 on review/mvp-vertical-slice, and pushed to origin for independent review; the remote's default branch main also points at that commit. The first review remediation (A-016) was committed as baab7195004463c06ff3bc0aa1b8b765eb34df0b on review/mvp-vertical-slice and pushed. The second review round (A-017) follows it on the same branch. No pull request, npm publication, deployment, merge, or release has occurred.

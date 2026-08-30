@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import * as path from 'node:path'
 
 import { afterEach, describe, expect, it } from 'vitest'
@@ -35,33 +35,45 @@ async function prepare(root: string, ports: InitPorts) {
   return prepared.value
 }
 
-/** Filesystem that creates an external target immediately before wrkrs publishes it. */
-function raceAt(target: string) {
+/**
+ * Filesystem that creates an external target immediately before wrkrs links
+ * it. The write happens inside the bound directory (the process working
+ * directory at that moment), exactly where the link is about to be created.
+ */
+function raceAt(targetName: string) {
   const raced = { count: 0 }
   const fs = interceptFileSystem(createTestPorts().fs, {
-    publishFileExclusive: async (args, next) => {
-      if (args[1].endsWith(target.split('/').join(path.sep))) {
-        raced.count += 1
-        writeFileSync(args[1], EXTERNAL_BYTES, { mode: 0o600 })
-      }
-      return next(...args)
+    bound: {
+      linkExclusive: async (args, next) => {
+        if (args[1] === targetName) {
+          raced.count += 1
+          writeFileSync(args[1], EXTERNAL_BYTES, { mode: 0o600 })
+        }
+        return next(...args)
+      },
     },
   })
   return { fs, raced }
 }
 
-describe('publishFileExclusive (Node port)', () => {
-  it('publishes staged content atomically and refuses to replace files, directories, or symlinks', async () => {
+describe('linkExclusive (Node port, bound directory)', () => {
+  it('creates the target name atomically as a hard link and refuses to replace files, directories, or symlinks', async () => {
     const directory = makeTempDir()
     cleanup.push(directory)
     const fs = createNodeFileSystem()
-    const staging = path.join(directory, '.target.tmp')
-    const target = path.join(directory, 'target.md')
-    await fs.writeFileExclusive(staging, new TextEncoder().encode('hello\n'), 0o644)
-    await fs.publishFileExclusive(staging, target)
-    expect(readFileSync(target, 'utf8')).toBe('hello\n')
-    expect(existsSync(staging)).toBe(false)
-    expect(fileMode(target)).toBe(0o644)
+    await fs.withinDirectory(directory, '', async (bound) => {
+      await bound.writeFileExclusive('.target.tmp', new TextEncoder().encode('hello\n'), 0o644)
+      await bound.linkExclusive('.target.tmp', 'target.md')
+    })
+    // Publication creates only the target name; staging cleanup is a separate step.
+    expect(readFileSync(path.join(directory, 'target.md'), 'utf8')).toBe('hello\n')
+    expect(existsSync(path.join(directory, '.target.tmp'))).toBe(true)
+    expect(statSync(path.join(directory, 'target.md')).ino).toBe(
+      statSync(path.join(directory, '.target.tmp')).ino,
+    )
+    expect(fileMode(path.join(directory, 'target.md'))).toBe(0o644)
+    await fs.withinDirectory(directory, '', (bound) => bound.unlink('.target.tmp'))
+    expect(existsSync(path.join(directory, '.target.tmp'))).toBe(false)
 
     for (const [name, create] of [
       ['file', () => writeFileSync(path.join(directory, 'file.md'), 'keep\n', { mode: 0o600 })],
@@ -72,16 +84,16 @@ describe('publishFileExclusive (Node port)', () => {
       ],
     ] as const) {
       create()
-      const existing = path.join(directory, `${name}.md`)
       const before = readTree(directory)
-      const stage = path.join(directory, `.${name}.tmp`)
-      await fs.writeFileExclusive(stage, new TextEncoder().encode('new\n'), 0o644)
-      await expect(fs.publishFileExclusive(stage, existing)).rejects.toMatchObject({
-        code: 'EEXIST',
+      await fs.withinDirectory(directory, '', async (bound) => {
+        await bound.writeFileExclusive(`.${name}.tmp`, new TextEncoder().encode('new\n'), 0o644)
+        await expect(bound.linkExclusive(`.${name}.tmp`, `${name}.md`)).rejects.toMatchObject({
+          code: 'EEXIST',
+        })
+        expect(await bound.lstat(`.${name}.tmp`)).not.toBeNull()
+        await bound.unlink(`.${name}.tmp`)
       })
-      expect(existsSync(stage)).toBe(true)
-      await fs.unlink(stage)
-      expect(readTree(directory)).toEqual(before.filter((entry) => !entry.path.endsWith('.tmp')))
+      expect(readTree(directory)).toEqual(before)
     }
     expect(readFileSync(path.join(directory, 'file.md'), 'utf8')).toBe('keep\n')
     expect(fileMode(path.join(directory, 'file.md'))).toBe(0o600)
@@ -92,7 +104,7 @@ describe('no-clobber publication during apply', () => {
   it('never overwrites a target that appears in a pre-existing .claude/agents and rolls everything else back', async () => {
     const root = createFixtureRepository('existing-claude-repository', { commit: true })
     cleanup.push(root)
-    const { fs, raced } = raceAt(TARGET)
+    const { fs, raced } = raceAt('wrkrs-qa-engineer.md')
     const ports = createTestPorts({ fs })
     const prepared = await prepare(root, ports)
     const before = hashTree(root)
@@ -108,28 +120,23 @@ describe('no-clobber publication during apply', () => {
     const external = path.join(root, ...TARGET.split('/'))
     expect(readFileSync(external, 'utf8')).toBe(EXTERNAL_BYTES)
     expect(fileMode(external)).toBe(0o600)
-    // Everything wrkrs created is gone; the tree equals the pre-apply tree plus the external file.
-    const after = readTree(root).filter((entry) => entry.path !== TARGET)
     expect(hashTree(root)).not.toBe(before)
-    expect(JSON.stringify(after)).toBe(
-      JSON.stringify(readTree(root).filter((entry) => entry.path !== TARGET)),
-    )
     expect(readTree(root).filter((entry) => entry.path.startsWith('.wrkrs'))).toEqual([])
     expect(
       readTree(root).filter((entry) => entry.path.includes('wrkrs-') && entry.path !== TARGET),
     ).toEqual([])
     const fresh = createFixtureRepository('existing-claude-repository', { commit: true })
     cleanup.push(fresh)
-    expect(hashTree(root)).not.toBe(hashTree(fresh))
-    expect(readTree(root).map((entry) => entry.path)).toEqual(
-      [...readTree(fresh).map((entry) => entry.path), TARGET].sort(),
-    )
+    // Every pre-existing entry is byte- and mode-identical; the only difference is the external file.
+    const freshEntries = readTree(fresh)
+    const afterEntries = readTree(root).filter((entry) => entry.path !== TARGET)
+    expect(afterEntries).toEqual(freshEntries)
   })
 
   it('preserves the external target and reports our non-empty directories when the race happens in a clean repository', async () => {
     const root = createFixtureRepository('clean-repository', { commit: true })
     cleanup.push(root)
-    const { fs, raced } = raceAt(TARGET)
+    const { fs, raced } = raceAt('wrkrs-qa-engineer.md')
     const ports = createTestPorts({ fs })
     const prepared = await prepare(root, ports)
 
@@ -180,17 +187,19 @@ describe('no-clobber publication during apply', () => {
     cleanup.push(root)
     let observed: string | null = null
     const fs = interceptFileSystem(createTestPorts().fs, {
-      publishFileExclusive: async (args, next) => {
-        if (args[1].endsWith('config.yaml')) {
-          mkdirSync(args[1])
-          try {
-            await next(...args)
-          } catch (error) {
-            observed = error instanceof FileSystemError ? error.code : 'other'
-            throw error
+      bound: {
+        linkExclusive: async (args, next) => {
+          if (args[1] === 'config.yaml') {
+            mkdirSync(args[1])
+            try {
+              await next(...args)
+            } catch (error) {
+              observed = error instanceof FileSystemError ? error.code : 'other'
+              throw error
+            }
           }
-        }
-        return next(...args)
+          return next(...args)
+        },
       },
     })
     const ports = createTestPorts({ fs })

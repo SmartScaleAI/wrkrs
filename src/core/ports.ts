@@ -30,32 +30,110 @@ export class FileSystemError extends Error {
   }
 }
 
+export type ContainmentErrorCode =
+  | 'PATH_ROOT_INVALID'
+  | 'PATH_ANCESTOR_MISSING'
+  | 'PATH_ANCESTOR_SYMLINK'
+  | 'PATH_ANCESTOR_NOT_A_DIRECTORY'
+  | 'PATH_ANCESTOR_CHANGED'
+  | 'PATH_ENTRY_CHANGED'
+
+/**
+ * Raised when a directory cannot be bound without leaving the repository:
+ * an ancestor is missing, is a symlink, is not a directory, or changed
+ * identity between inspection and binding. Nothing is read or written when
+ * this is thrown. Messages are controlled and never include file content.
+ */
+export class ContainmentError extends Error {
+  readonly code: ContainmentErrorCode
+  /** Repository-relative directory that was requested. */
+  readonly directory: string
+  /** Repository-relative path of the segment that failed, when applicable. */
+  readonly ancestor: string | null
+
+  constructor(
+    code: ContainmentErrorCode,
+    directory: string,
+    ancestor: string | null,
+    message: string,
+  ) {
+    super(message)
+    this.name = 'ContainmentError'
+    this.code = code
+    this.directory = directory
+    this.ancestor = ancestor
+  }
+}
+
+/**
+ * Raised when the filesystem cannot create a hard link, which is the only
+ * atomic no-replace publication primitive wrkrs uses. wrkrs fails closed
+ * instead of falling back to a non-atomic copy.
+ */
+export class AtomicPublicationUnsupportedError extends Error {
+  readonly code = 'ATOMIC_PUBLICATION_UNSUPPORTED'
+  readonly errno: string
+
+  constructor(errno: string, message: string) {
+    super(message)
+    this.name = 'AtomicPublicationUnsupportedError'
+    this.errno = errno
+  }
+}
+
+/** Result of syncing a directory's entries to stable storage. */
+export type DirectorySyncResult = 'synced' | 'unsupported'
+
+/**
+ * Operations on a directory that has been bound (its identity verified and
+ * held) so that names resolve inside that directory regardless of later
+ * changes to any ancestor. Names are single path segments; they never contain
+ * separators, and the final segment is never followed when it is a symlink.
+ */
+export interface BoundDirectory {
+  /** Repository-relative path of the bound directory ('' for the root). */
+  readonly relativePath: string
+  lstat(name: string): Promise<FileStat | null>
+  /**
+   * Reads a regular file without following a symlink at name. The opened
+   * handle must have the identity lstat reported; otherwise the read fails
+   * with ContainmentError PATH_ENTRY_CHANGED and nothing is returned.
+   */
+  readFile(name: string, maxBytes?: number): Promise<Uint8Array>
+  /** Entries sorted by name. */
+  readDirectory(): Promise<readonly DirectoryEntry[]>
+  /** Creates a new file (O_EXCL, no follow), writes all bytes, and syncs them. */
+  writeFileExclusive(name: string, data: Uint8Array, mode: number): Promise<void>
+  /**
+   * Atomically creates toName as a hard link of fromName. Fails with EEXIST
+   * for any existing entry, and with AtomicPublicationUnsupportedError when the
+   * filesystem cannot create hard links. Never replaces anything.
+   */
+  linkExclusive(fromName: string, toName: string): Promise<void>
+  unlink(name: string): Promise<void>
+  /** Replaces toName with fromName atomically. Used only for wrkrs bookkeeping files. */
+  rename(fromName: string, toName: string): Promise<void>
+  makeDirectory(name: string, mode: number): Promise<void>
+  removeDirectory(name: string): Promise<void>
+  /** Syncs this directory's entries; 'unsupported' where the platform cannot. */
+  sync(): Promise<DirectorySyncResult>
+}
+
 export interface FileSystemPort {
   /** lstat semantics: a symlink is reported as a symlink. Returns null when absent. */
   lstat(path: string): Promise<FileStat | null>
   /** Resolves symlinks; returns null when the path does not exist. */
   realpath(path: string): Promise<string | null>
-  readFile(path: string): Promise<Uint8Array>
-  /** Entries sorted by name for deterministic scanning. */
-  readDirectory(path: string): Promise<readonly DirectoryEntry[]>
-  /** Creates a new file; fails with EEXIST when the path already exists. */
-  writeFileExclusive(path: string, data: Uint8Array, mode: number): Promise<void>
-  /** Overwrites or creates a file. Used only for wrkrs transaction bookkeeping. */
-  writeFile(path: string, data: Uint8Array, mode: number): Promise<void>
   /**
-   * Publishes a fully written, synced staging file at targetPath without ever
-   * replacing an existing entry. Fails with EEXIST when any entry (file,
-   * directory, or symlink) exists at targetPath and leaves that entry and the
-   * staging file untouched. On success the staging path no longer exists.
+   * Binds relativeDirectory beneath root (verifying every ancestor with lstat
+   * and directory identity, refusing symlinks) and runs operation against it.
+   * Throws ContainmentError before any I/O when the directory cannot be bound.
    */
-  publishFileExclusive(stagingPath: string, targetPath: string): Promise<void>
-  /** Renames a wrkrs-owned bookkeeping file, replacing the destination atomically. */
-  rename(from: string, to: string): Promise<void>
-  unlink(path: string): Promise<void>
-  /** Creates one directory level; fails with EEXIST when it already exists. */
-  makeDirectory(path: string, mode: number): Promise<void>
-  /** Removes an empty directory; fails with ENOTEMPTY otherwise. */
-  removeDirectory(path: string): Promise<void>
+  withinDirectory<T>(
+    root: string,
+    relativeDirectory: string,
+    operation: (directory: BoundDirectory) => Promise<T>,
+  ): Promise<T>
 }
 
 export interface ProcessResult {

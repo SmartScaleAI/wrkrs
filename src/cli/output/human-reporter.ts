@@ -207,6 +207,12 @@ export function renderApplyResult(result: ApplyResult, style: Styler): string {
           ` (transaction ${result.transactionId})`,
       )
       lines.push(`  ${result.failure}`)
+      if (result.conflict) {
+        lines.push(
+          `  ${style.red(result.conflict.code)}${result.conflict.path ? ` ${result.conflict.path}` : ''}: ${result.conflict.message}`,
+        )
+        lines.push(`    ${style.dim(result.conflict.remediation)}`)
+      }
       for (const diagnostic of result.diagnostics.filter((item) => item.severity === 'error')) {
         lines.push(
           `  ${style.red('error')} ${diagnostic.code}${diagnostic.path ? ` ${diagnostic.path}` : ''}: ${diagnostic.message}`,
@@ -220,6 +226,12 @@ export function renderApplyResult(result: ApplyResult, style: Styler): string {
           ` (transaction ${result.transactionId})`,
       )
       lines.push(`  ${result.failure}`)
+      if (result.conflict) {
+        lines.push(
+          `  ${style.red(result.conflict.code)}${result.conflict.path ? ` ${result.conflict.path}` : ''}: ${result.conflict.message}`,
+        )
+        lines.push(`    ${style.dim(result.conflict.remediation)}`)
+      }
       lines.push('  Retained paths (not deleted because they changed or could not be removed):')
       for (const item of result.retained) lines.push(`    ${item.path}: ${item.reason}`)
       lines.push(

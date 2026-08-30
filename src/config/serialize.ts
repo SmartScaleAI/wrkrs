@@ -75,6 +75,7 @@ export function serializeJournal(journal: TransactionJournal): string {
     startedAt: journal.startedAt,
     updatedAt: journal.updatedAt,
     status: journal.status,
+    durability: journal.durability,
     operations: journal.operations.map((operation) => ({
       path: operation.path,
       kind: operation.kind,
