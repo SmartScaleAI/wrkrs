@@ -35,6 +35,7 @@ import {
   plannedOperation,
   withDurability,
   withOperation,
+  withoutStrictDurability,
   withStatus,
 } from './journal.js'
 import { recheckPreconditions } from './preconditions.js'
@@ -100,6 +101,81 @@ const LOCK_FILE_NAME = baseName(LOCK_PATH)
 const REPLAN = 'Run `wrkrs init --dry-run` again and review the new plan'
 const DURABILITY_UNPROVEN =
   'removed, but the directory sync failed so the removal is not proven durable'
+
+/**
+ * Authoritative state of every bookkeeping name inside .wrkrs (the lock, the
+ * live journal, and journal temporaries) this transaction removed or failed
+ * to remove. Each exact path is in one of these states:
+ *
+ * - unknown: never created by this transaction, or its removal is proven
+ *   durable. Nothing is reported.
+ * - pending: the unlink succeeded and the name was verified absent, but the
+ *   directory entry has not been synced yet. It is reported as
+ *   durability-unproven unless a later completed sync of .wrkrs proves it.
+ * - retained: the name could not be removed, is still present, or could not
+ *   be inspected. No later sync clears it.
+ *
+ * Every completed .wrkrs directory sync proves the pending removals in that
+ * directory, including the sync persistJournal performs, so the reported
+ * paths always reflect the latest proven filesystem state. Removals whose
+ * durability depends on another directory (.wrkrs itself, which is synced
+ * through its parent) are recorded as retained instead, because no .wrkrs
+ * sync can prove them.
+ */
+class BookkeepingLedger {
+  /** Exact paths removed and verified absent, awaiting the sync that proves it. */
+  private readonly pending = new Set<string>()
+  /** Exact path -> reason it may still exist; never cleared by a directory sync. */
+  private readonly retained = new Map<string, string>()
+
+  /** The unlink succeeded and the name is gone; its durability is not proven yet. */
+  awaitingSync(path: string): void {
+    this.retained.delete(path)
+    this.pending.add(path)
+  }
+
+  /** The name could not be removed, is still present, or could not be inspected. */
+  retain(path: string, reason: string): void {
+    this.pending.delete(path)
+    this.retained.set(path, reason)
+  }
+
+  /** Whether this transaction still believes the name may exist. */
+  mayExist(path: string): boolean {
+    return this.retained.has(path)
+  }
+
+  /** Whether the path is reported at all (pending or retained). */
+  has(path: string): boolean {
+    return this.pending.has(path) || this.retained.has(path)
+  }
+
+  /** Whether any name could not be removed, whatever its durability. */
+  get hasRetained(): boolean {
+    return this.retained.size > 0
+  }
+
+  /** Whether any removal is still awaiting the sync that proves it. */
+  get hasUnproven(): boolean {
+    return this.pending.size > 0
+  }
+
+  get isEmpty(): boolean {
+    return this.pending.size === 0 && this.retained.size === 0
+  }
+
+  /** A completed sync of .wrkrs proves every pending removal inside it. */
+  directorySynced(): void {
+    this.pending.clear()
+  }
+
+  /** Current state, one entry per exact path. */
+  entries(): RetainedPath[] {
+    const merged = new Map<string, string>(this.retained)
+    for (const path of this.pending) if (!merged.has(path)) merged.set(path, DURABILITY_UNPROVEN)
+    return [...merged.entries()].map(([path, reason]) => ({ path, reason }))
+  }
+}
 
 function orderedCreates(plan: InstallPlan): PlanOperation[] {
   const creates = plan.operations.filter((operation) => operation.outcome === 'create')
@@ -311,16 +387,51 @@ export async function applyPlan(input: ApplyInput, ports: WriterPorts): Promise<
     wrkrsCreated = true
   }
 
-  /** Paths of journal temporaries that could not be removed; reported on every exit. */
-  const retainedTemps = new Map<string, string>()
+  /** Authoritative state of every bookkeeping name this transaction may create. */
+  const ledger = new BookkeepingLedger()
   const bookkeeping: { durability: TransactionDurability } = { durability: 'strict' }
   const noteSync = (sync: DirectorySyncResult): void => {
     if (sync === 'unsupported') bookkeeping.durability = 'best-effort'
   }
 
   /**
-   * Removes bookkeeping in the proven order (unlink, verify absent, sync) and
-   * returns every path whose removal could not be proven.
+   * Removes one bookkeeping name inside a bound directory and records the
+   * exact outcome: unlink, verify absence, then mark the removal as awaiting
+   * the directory sync that proves it. A name that was never there needs no
+   * proof and is left as it is, so an earlier proven removal is never
+   * resurrected as pending.
+   */
+  const removeNamed = async (bound: BoundDirectory, name: string, path: string): Promise<void> => {
+    let unlinked = false
+    try {
+      await bound.unlink(name)
+      unlinked = true
+    } catch (error) {
+      if (!(error instanceof FileSystemError && error.code === 'ENOENT')) {
+        ledger.retain(path, 'bookkeeping could not be removed')
+        return
+      }
+    }
+    let present: boolean
+    try {
+      present = (await bound.lstat(name)) !== null
+    } catch (error) {
+      ledger.retain(path, `could not verify removal (${describeFailure(error)})`)
+      return
+    }
+    if (present) {
+      ledger.retain(path, 'still present after removal')
+      return
+    }
+    if (unlinked || ledger.mayExist(path)) ledger.awaitingSync(path)
+  }
+
+  /**
+   * Removes transient bookkeeping (a retained journal temporary, the lock,
+   * and the live journal) in the proven order and records every outcome in
+   * the ledger. A real directory-sync failure is never collapsed onto
+   * .wrkrs: every exact path whose removal was awaiting that sync stays
+   * pending and is reported by name.
    */
   const releaseBookkeeping = async (options: {
     /** Keep the live journal as the recovery record when anything else is retained. */
@@ -331,57 +442,44 @@ export async function applyPlan(input: ApplyInput, ports: WriterPorts): Promise<
      * holds the repository-owned configuration and manifest and must stay.
      */
     removeCreatedDirectory: boolean
-  }): Promise<RetainedPath[]> => {
-    const remaining = new Map<string, string>()
-    const removeNamed = async (
-      bound: BoundDirectory,
-      name: string,
-      path: string,
-    ): Promise<boolean> => {
-      try {
-        await bound.unlink(name)
-      } catch (error) {
-        if (!(error instanceof FileSystemError && error.code === 'ENOENT')) {
-          remaining.set(path, 'bookkeeping could not be removed')
-          return false
-        }
-      }
-      if (await bound.lstat(name)) {
-        remaining.set(path, 'still present after removal')
-        return false
-      }
-      return true
-    }
+  }): Promise<void> => {
+    let keptJournal = false
     try {
       await inDirectory(WRKRS_DIRECTORY, async (bound) => {
-        // A journal temporary is only ever ours when a previous cleanup failed;
-        // any other entry under that name belongs to someone else and stays.
-        let tempRemoved = false
-        if (retainedTemps.has(journalTempPath)) {
-          tempRemoved = await removeNamed(bound, journalTempName, journalTempPath)
+        // A journal temporary is only ever ours when a previous cleanup
+        // failed; any other entry under that name belongs to someone else
+        // and stays. One that is merely awaiting its sync is already gone.
+        if (ledger.mayExist(journalTempPath)) {
+          await removeNamed(bound, journalTempName, journalTempPath)
         }
         await removeNamed(bound, LOCK_FILE_NAME, LOCK_PATH)
-        const keepJournal = options.keepJournalWhenRetained && remaining.size > 0
-        if (!keepJournal) await removeNamed(bound, JOURNAL_FILE_NAME, JOURNAL_PATH)
+        // The live journal is kept as the recovery record only when a name
+        // could not be removed; a removal awaiting its sync is covered by
+        // the sync below.
+        keptJournal = options.keepJournalWhenRetained && ledger.hasRetained
+        if (!keptJournal) await removeNamed(bound, JOURNAL_FILE_NAME, JOURNAL_PATH)
         try {
           noteSync(await bound.sync())
-          // Only a removal whose directory entry is synced counts as proven;
-          // the retention map then reflects the current state.
-          if (tempRemoved) retainedTemps.delete(journalTempPath)
+          ledger.directorySynced()
         } catch {
-          remaining.set(WRKRS_DIRECTORY, DURABILITY_UNPROVEN)
+          // Every removal awaiting this sync keeps its exact path and is
+          // reported as durability-unproven until a later sync proves it.
         }
       })
     } catch (error) {
       if (!(error instanceof ContainmentError && error.code === 'PATH_ANCESTOR_MISSING')) {
-        remaining.set(WRKRS_DIRECTORY, describeFailure(error))
+        // .wrkrs itself is named only when the directory could not be bound.
+        ledger.retain(WRKRS_DIRECTORY, describeFailure(error))
       }
     }
-    if (options.removeCreatedDirectory && wrkrsCreated && remaining.size === 0) {
+    // The directory is removed unless it was deliberately kept as the
+    // recovery location; when it cannot be removed (for example because a
+    // retained entry is still inside) that failure is reported for .wrkrs
+    // itself, never as a substitute for an individual file.
+    if (options.removeCreatedDirectory && wrkrsCreated && !keptJournal) {
       const leftover = await removeCreatedWrkrs(inDirectory, noteSync)
-      if (leftover) remaining.set(leftover.path, leftover.reason)
+      if (leftover) ledger.retain(leftover.path, leftover.reason)
     }
-    return retainedEntries(remaining)
   }
 
   const lockContent = JSON.stringify(
@@ -427,10 +525,8 @@ export async function applyPlan(input: ApplyInput, ports: WriterPorts): Promise<
     // The lock name exists (the write failed after creation, or the directory
     // sync failed after a successful creation): prove it gone or report it;
     // never return plain "aborted" while it remains.
-    const remaining = await releaseBookkeeping({
-      keepJournalWhenRetained: false,
-      removeCreatedDirectory: true,
-    })
+    await releaseBookkeeping({ keepJournalWhenRetained: false, removeCreatedDirectory: true })
+    const remaining = ledger.entries()
     if (remaining.length > 0) {
       return incompleteBookkeeping(
         transactionId,
@@ -488,9 +584,18 @@ export async function applyPlan(input: ApplyInput, ports: WriterPorts): Promise<
   })
   const persist = async (next: TransactionJournal): Promise<TransactionJournal> => {
     try {
-      return await persistJournal(fs, root, next, clock)
+      const persisted = await persistJournal(fs, root, next, clock)
+      // persistJournal only returns after a completed .wrkrs directory sync,
+      // which also proves every bookkeeping removal pending in that directory.
+      ledger.directorySynced()
+      return persisted
     } catch (error) {
-      if (error instanceof JournalTempRetainedError) retainedTemps.set(error.tempPath, error.reason)
+      if (error instanceof JournalTempRetainedError) {
+        // A temporary that was removed but not synced stays reconcilable; one
+        // that may still exist is retained until a later removal proves it gone.
+        if (error.removed) ledger.awaitingSync(error.tempPath)
+        else ledger.retain(error.tempPath, error.reason)
+      }
       throw error
     }
   }
@@ -498,10 +603,8 @@ export async function applyPlan(input: ApplyInput, ports: WriterPorts): Promise<
   try {
     journal = await persist(journal)
   } catch (error) {
-    const remaining = mergeRetained(
-      await releaseBookkeeping({ keepJournalWhenRetained: true, removeCreatedDirectory: true }),
-      retainedTemps,
-    )
+    await releaseBookkeeping({ keepJournalWhenRetained: true, removeCreatedDirectory: true })
+    const remaining = ledger.entries()
     if (remaining.length > 0) {
       return incompleteBookkeeping(transactionId, error, remaining, JOURNAL_PATH)
     }
@@ -522,10 +625,8 @@ export async function applyPlan(input: ApplyInput, ports: WriterPorts): Promise<
     allowExistingDirectories: new Set(wrkrsCreated ? [WRKRS_DIRECTORY] : []),
   })
   if (after.length > 0) {
-    const remaining = mergeRetained(
-      await releaseBookkeeping({ keepJournalWhenRetained: true, removeCreatedDirectory: true }),
-      retainedTemps,
-    )
+    await releaseBookkeeping({ keepJournalWhenRetained: true, removeCreatedDirectory: true })
+    const remaining = ledger.entries()
     if (remaining.length > 0) {
       return incompleteBookkeeping(
         transactionId,
@@ -704,10 +805,8 @@ export async function applyPlan(input: ApplyInput, ports: WriterPorts): Promise<
     // Only transient bookkeeping (lock, journal temporary, live journal) is
     // removed after a successful commit; the installed .wrkrs directory and
     // its repository-owned contents stay.
-    const leftovers = mergeRetained(
-      await releaseBookkeeping({ keepJournalWhenRetained: false, removeCreatedDirectory: false }),
-      retainedTemps,
-    )
+    await releaseBookkeeping({ keepJournalWhenRetained: false, removeCreatedDirectory: false })
+    const leftovers = ledger.entries()
     let durability: TransactionDurability =
       journal.durability === 'best-effort' || bookkeeping.durability === 'best-effort'
         ? 'best-effort'
@@ -778,16 +877,14 @@ export async function applyPlan(input: ApplyInput, ports: WriterPorts): Promise<
         journal = withStatus(journal, 'rolled-back', failure)
       }
       // Bookkeeping release retries a previously retained journal temporary
-      // and clears it from the retention map once its removal is proven, so a
-      // transient failure does not surface a stale retained path.
-      const leftovers = mergeRetained(
-        await releaseBookkeeping({ keepJournalWhenRetained: true, removeCreatedDirectory: true }),
-        retainedTemps,
-      )
-      for (const item of leftovers) retained.set(item.path, item.reason)
+      // and clears it from the ledger once its removal is proven, so a
+      // transient failure does not surface a stale retained path. Ledger
+      // state is read once, at the end, so a later proven sync is never
+      // reported from a stale copy.
+      await releaseBookkeeping({ keepJournalWhenRetained: true, removeCreatedDirectory: true })
       // Final proof: every directory this transaction created must be gone.
       for (const directory of [...createdDirectories].reverse()) {
-        if (retained.has(directory)) continue
+        if (retained.has(directory) || ledger.has(directory)) continue
         const parent = parentDirectory(directory) ?? ''
         try {
           const stat = await inDirectory(parent, (bound) => bound.lstat(baseName(directory)))
@@ -800,7 +897,7 @@ export async function applyPlan(input: ApplyInput, ports: WriterPorts): Promise<
           }
         }
       }
-      if (retained.size === 0) {
+      if (retained.size === 0 && ledger.isEmpty) {
         return {
           status: 'rolled-back',
           transactionId,
@@ -811,45 +908,39 @@ export async function applyPlan(input: ApplyInput, ports: WriterPorts): Promise<
       }
     }
 
-    for (const [path, reason] of retainedTemps) retained.set(path, reason)
     // Release the lock through the same durable removal contract used
-    // everywhere else (unlink, verify absence, sync, then forget), before the
-    // final journal write so the persisted durability and the retained list
-    // match the filesystem. The live journal stays as the recovery record.
+    // everywhere else (unlink, verify absence, sync, then forget). The exact
+    // path stays pending in the ledger until a completed .wrkrs sync — this
+    // one or the final journal write below — proves the removal durable.
     try {
       await inDirectory(WRKRS_DIRECTORY, async (bound) => {
-        let lockRemoved = true
-        try {
-          await bound.unlink(LOCK_FILE_NAME)
-        } catch (unlinkError) {
-          if (!(unlinkError instanceof FileSystemError && unlinkError.code === 'ENOENT')) {
-            retained.set(LOCK_PATH, 'bookkeeping could not be removed')
-            lockRemoved = false
-          }
-        }
-        if (lockRemoved && (await bound.lstat(LOCK_FILE_NAME))) {
-          retained.set(LOCK_PATH, 'still present after removal')
-          lockRemoved = false
-        }
+        await removeNamed(bound, LOCK_FILE_NAME, LOCK_PATH)
         try {
           journal = withDurability(journal, await bound.sync())
+          ledger.directorySynced()
         } catch {
-          if (lockRemoved) retained.set(LOCK_PATH, DURABILITY_UNPROVEN)
+          // Pending removals keep their exact paths; the final journal write
+          // syncs the same directory and reconciles them when it succeeds.
         }
       })
     } catch (releaseError) {
       if (!(
         releaseError instanceof ContainmentError && releaseError.code === 'PATH_ANCESTOR_MISSING'
       )) {
-        retained.set(LOCK_PATH, describeFailure(releaseError))
+        ledger.retain(LOCK_PATH, describeFailure(releaseError))
       }
     }
+    // A removal that is not proven durable must not be recorded under a
+    // strict durability claim, so the persisted journal and the reported
+    // paths cannot contradict each other.
+    if (ledger.hasUnproven) journal = withoutStrictDurability(journal)
     try {
       await persist(withStatus(journal, 'rollback-incomplete', failure))
     } catch {
       // The live journal remains the recovery record in its last persisted state.
     }
-    for (const [path, reason] of retainedTemps) retained.set(path, reason)
+    // Read the ledger once, after the last sync that could prove a removal.
+    for (const item of ledger.entries()) retained.set(item.path, item.reason)
     return {
       status: 'rollback-incomplete',
       transactionId,
@@ -862,21 +953,6 @@ export async function applyPlan(input: ApplyInput, ports: WriterPorts): Promise<
       diagnostics,
     }
   }
-}
-
-function retainedEntries(map: ReadonlyMap<string, string>): RetainedPath[] {
-  return [...map.entries()].map(([path, reason]) => ({ path, reason }))
-}
-
-/** Merges retained entries with the current temp-retention map without duplicates. */
-function mergeRetained(
-  entries: readonly RetainedPath[],
-  temps: ReadonlyMap<string, string>,
-): RetainedPath[] {
-  const merged = new Map<string, string>()
-  for (const item of entries) if (!merged.has(item.path)) merged.set(item.path, item.reason)
-  for (const [path, reason] of temps) if (!merged.has(path)) merged.set(path, reason)
-  return retainedEntries(merged)
 }
 
 /** Removes a .wrkrs directory this transaction created (rmdir, verify, sync); returns the retained entry when that fails. */

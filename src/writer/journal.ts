@@ -29,12 +29,19 @@ export const JOURNAL_FILE_NAME = baseName(JOURNAL_PATH)
 export class JournalTempRetainedError extends Error {
   readonly tempPath: string
   readonly reason: string
+  /**
+   * True when the temporary was unlinked and verified absent and only its
+   * durability is unproven, so a later completed directory sync still proves
+   * the removal. False when the name may still exist.
+   */
+  readonly removed: boolean
 
-  constructor(tempPath: string, reason: string, cause: unknown) {
-    super(`journal temporary file retained: ${tempPath} (${reason})`, { cause })
+  constructor(tempPath: string, reason: string, options: { removed: boolean; cause: unknown }) {
+    super(`journal temporary file retained: ${tempPath} (${reason})`, { cause: options.cause })
     this.name = 'JournalTempRetainedError'
     this.tempPath = tempPath
     this.reason = reason
+    this.removed = options.removed
   }
 }
 
@@ -95,7 +102,15 @@ export function withDurability(
   journal: TransactionJournal,
   sync: DirectorySyncResult,
 ): TransactionJournal {
-  if (sync === 'synced') return journal
+  return sync === 'synced' ? journal : withoutStrictDurability(journal)
+}
+
+/**
+ * Downgrades the journal to best-effort durability. Used when a removal this
+ * transaction performed is not proven durable at the moment the journal is
+ * written, so the recorded durability never claims more than was proven.
+ */
+export function withoutStrictDurability(journal: TransactionJournal): TransactionJournal {
   return journal.durability === 'best-effort' ? journal : { ...journal, durability: 'best-effort' }
 }
 
@@ -119,16 +134,27 @@ async function removeTemp(
     await directory.unlink(tempName)
   } catch (error) {
     if (!(error instanceof FileSystemError && error.code === 'ENOENT')) {
-      throw new JournalTempRetainedError(tempPath, 'could not be removed', cause)
+      throw new JournalTempRetainedError(tempPath, 'could not be removed', {
+        removed: false,
+        cause,
+      })
     }
   }
   if (await directory.lstat(tempName)) {
-    throw new JournalTempRetainedError(tempPath, 'still present after removal', cause)
+    throw new JournalTempRetainedError(tempPath, 'still present after removal', {
+      removed: false,
+      cause,
+    })
   }
   try {
     return await directory.sync()
   } catch {
-    throw new JournalTempRetainedError(tempPath, 'removal is not proven durable', cause)
+    // The name is gone; only its durability is unproven, so a later completed
+    // sync of .wrkrs still proves this removal.
+    throw new JournalTempRetainedError(tempPath, 'removal is not proven durable', {
+      removed: true,
+      cause,
+    })
   }
 }
 

@@ -418,4 +418,13 @@ Fourth review round regression tests (decisions.md A-019):
 | Successful installs keep .wrkrs with no bookkeeping warning and pass check | test/unit/writer/bookkeeping.test.ts |
 | Journal-temp retention cleared after proven cleanup; permanent failure still names the existing temp exactly | test/unit/writer/bookkeeping.test.ts, test/unit/writer/exclusive-write.test.ts |
 
+Fifth review round regression tests (decisions.md A-020):
+
+| Finding | Where |
+| --- | --- |
+| A failed cleanup sync names every exact pending path (`.wrkrs/.lock`, `.wrkrs/.journal.json`, the journal temporary) and never substitutes `.wrkrs` | test/unit/writer/bookkeeping.test.ts |
+| A retried journal temporary loses its stale unlink-failure reason and is reported as durability-unproven, once | test/unit/writer/bookkeeping.test.ts |
+| A later successful journal-persist sync clears the reconciled lock entry while the genuinely retained agent stays | test/unit/writer/bookkeeping.test.ts |
+| A persistent sync failure keeps the exact `.wrkrs/.lock` entry, a best-effort journal, and honest `wrkrs check` diagnostics | test/unit/writer/bookkeeping.test.ts |
+
 Deliberately deferred, unchanged from the approved scope: update, uninstall, shared-file structural edits, providers, and cross-platform CI. Verified on macOS with Node 22.23.2 and 24.18.1. Linux is unverified; Windows fails closed by design in this MVP and is not supported until the cross-platform increment.

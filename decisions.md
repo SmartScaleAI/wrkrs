@@ -483,6 +483,25 @@ Rationale:
 - A warning that tells the user to delete the freshly installed configuration directory is worse than no warning; bookkeeping and installed content must never share a cleanup path.
 - Retained-path reports are only useful if they describe the filesystem as it is, which requires clearing state after proven cleanup and applying the durable removal contract on every exit.
 
+### A-020: Fifth review round: one bookkeeping removal ledger with reconciled durability
+
+Status: Proposed  
+Date: 2026-08-30
+
+An independent review of commit 0b8b9140328e7678ee85ce5b4c9d50de0e17c10a confirmed two remaining findings in the A-019 implementation. The corrections below were implemented on review/mvp-vertical-slice and are recorded for owner review; A-019 stands as history, and every behavior it introduced (in particular the conservative partial-staging policy) is preserved. Scope is unchanged.
+
+Decision:
+
+- One authoritative ledger for bookkeeping removals. Every bookkeeping name inside `.wrkrs` — the lock, the live journal, and journal temporaries — is tracked in a single in-memory ledger used by every cleanup path, replacing the per-path ad hoc handling. A name is unknown (never created, or its removal proven), pending (unlinked and verified absent, awaiting the directory sync that proves it), or retained (could not be removed, still present, or could not be inspected). The removal order is unchanged: unlink, verify absence, record the exact path as pending, sync the containing directory, and only then clear it.
+- Exact-path attribution for sync failures. A real `.wrkrs` directory-sync error no longer collapses onto `.wrkrs`. Each pending path is reported by name — `.wrkrs/.lock`, `.wrkrs/.journal.json`, `.wrkrs/.journal.json.<id>.tmp` — with the durability-unproven reason; `.wrkrs` itself is named only when the directory could not be bound, inspected, or removed. A name whose unlink succeeded never keeps an outdated "could not be removed" reason, and retained paths are unique. A sync that reports `unsupported` keeps the existing best-effort policy and is never confused with an I/O error.
+- Durability reconciliation. Every completed `.wrkrs` directory sync, including the one `persistJournal` performs on the final rollback-incomplete write, proves the pending removals in that directory and clears them, so a transient sync failure no longer leaves a stale `.wrkrs/.lock` entry. Unlink failures, inspection failures, and names that still exist are never cleared by a later sync, and `.wrkrs` (whose durability depends on its parent) is likewise never cleared by a `.wrkrs` sync. When any removal is still unproven as the final journal is written, that journal records `best-effort` durability, so the serialized durability and the returned retained paths cannot contradict each other. The live journal remains the recovery record whenever rollback stays incomplete.
+
+Rationale:
+
+- A retained path is only actionable if it names the file the user must look at; `.wrkrs` as a stand-in both hid which removal was unproven and implied the whole directory was at fault.
+- Durability is a property of the directory entry, not of the moment it was first attempted: a later fsync of the same directory flushes the earlier deletion, so refusing to reconcile reported a failure that provably no longer existed.
+- Keeping the pending set and the persisted journal on one clock — conservative when unproven, cleared when proven — is what makes the two records consistent without either over-claiming or inventing a second cleanup path.
+
 ## Deferred decisions
 
 ### D-001: Exact provider authentication and capability mappings
@@ -528,4 +547,4 @@ Vertical slice approval: Approved by the owner on 2026-08-29
 Production dependency approval: Approved by the owner on 2026-08-29 (commander, zod, yaml)  
 Implementation repository selection: Approved by the owner on 2026-08-29 (github.com/SmartScaleAI/wrkrs, public, MIT)
 
-Implementation status: the first vertical slice was implemented on 2026-08-29, committed as a8e4a5ba567dc06a96868bf941b242a00e30df49 on review/mvp-vertical-slice, and pushed to origin for independent review; the remote's default branch main also points at that commit. The first review remediation (A-016) was committed as baab7195004463c06ff3bc0aa1b8b765eb34df0b on review/mvp-vertical-slice and pushed; the second (A-017) as 14c8c4c0890196741a86e7ad045c04bb5ef0e81a; the third (A-018) as 61df451e41d6884082983af1376c5a030a300f7b; the fourth (A-019) follows on the same branch. No pull request, npm publication, deployment, merge, or release has occurred.
+Implementation status: the first vertical slice was implemented on 2026-08-29, committed as a8e4a5ba567dc06a96868bf941b242a00e30df49 on review/mvp-vertical-slice, and pushed to origin for independent review; the remote's default branch main also points at that commit. The first review remediation (A-016) was committed as baab7195004463c06ff3bc0aa1b8b765eb34df0b on review/mvp-vertical-slice and pushed; the second (A-017) as 14c8c4c0890196741a86e7ad045c04bb5ef0e81a; the third (A-018) as 61df451e41d6884082983af1376c5a030a300f7b; the fourth (A-019) as 0b8b9140328e7678ee85ce5b4c9d50de0e17c10a; the fifth (A-020) follows on the same branch. No pull request, npm publication, deployment, merge, or release has occurred.
