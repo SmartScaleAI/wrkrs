@@ -2,6 +2,7 @@ import { serializeJournal } from '../config/serialize.js'
 import {
   JOURNAL_PATH,
   WRKRS_DIRECTORY,
+  type JournalCommand,
   type JournalOperation,
   type JournalOperationStatus,
   type TransactionJournal,
@@ -49,12 +50,13 @@ export function createJournal(input: {
   transactionId: string
   planDigest: string
   startedAt: string
+  command?: JournalCommand
   operations: readonly JournalOperation[]
 }): TransactionJournal {
   return {
     schemaVersion: 1,
     transactionId: input.transactionId,
-    command: 'init',
+    command: input.command ?? 'init',
     planDigest: input.planDigest,
     startedAt: input.startedAt,
     updatedAt: input.startedAt,
@@ -71,7 +73,17 @@ export function plannedOperation(
   status: JournalOperationStatus = 'planned',
   expectedHash: string | null = null,
 ): JournalOperation {
-  return { path, kind, status, stagingPath: null, expectedHash, appliedHash: null, note: null }
+  return {
+    path,
+    kind,
+    status,
+    stagingPath: null,
+    backupPath: null,
+    backupHash: null,
+    expectedHash,
+    appliedHash: null,
+    note: null,
+  }
 }
 
 export function withStatus(
@@ -86,7 +98,16 @@ export function withOperation(
   journal: TransactionJournal,
   path: string,
   patch: Partial<
-    Pick<JournalOperation, 'status' | 'stagingPath' | 'expectedHash' | 'appliedHash' | 'note'>
+    Pick<
+      JournalOperation,
+      | 'status'
+      | 'stagingPath'
+      | 'backupPath'
+      | 'backupHash'
+      | 'expectedHash'
+      | 'appliedHash'
+      | 'note'
+    >
   >,
 ): TransactionJournal {
   return {

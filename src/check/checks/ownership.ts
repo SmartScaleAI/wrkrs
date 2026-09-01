@@ -4,7 +4,7 @@ import { sha256 } from '../../platform/hash.js'
 import { containmentDiagnostic, type CheckContext } from '../context.js'
 
 const UPDATE_REMEDIATION =
-  'Restore the generated content from version control, or wait for the planned `wrkrs update` command to reconcile it'
+  'Restore the generated content from version control, or run `wrkrs update`, which preserves your change and reports it'
 
 export async function checkOwnership(context: CheckContext): Promise<Diagnostic[]> {
   const diagnostics: Diagnostic[] = []
@@ -140,7 +140,9 @@ export async function checkOwnership(context: CheckContext): Promise<Diagnostic[
     }
   }
 
-  for (const path of [CONFIG_PATH, SCHEMA_PATH]) {
+  // A partial uninstall deliberately leaves the core files unowned; only a
+  // live installation is expected to own them.
+  for (const path of manifest.state === 'partial-uninstall' ? [] : [CONFIG_PATH, SCHEMA_PATH]) {
     if (!ownedPaths.has(path)) {
       diagnostics.push(
         createDiagnostic(
@@ -149,7 +151,7 @@ export async function checkOwnership(context: CheckContext): Promise<Diagnostic[
           'Core wrkrs file is not recorded in the manifest',
           {
             path,
-            remediation: 'A future `wrkrs update` can adopt it',
+            remediation: 'Run `wrkrs update` to adopt it',
           },
         ),
       )

@@ -65,6 +65,7 @@ export function planToJson(plan: InstallPlan): Record<string, JsonValue> {
     operations: plan.operations.map(operationToJson),
     blockers: plan.blockers.map((blocker) => ({ ...blocker })),
     createdDirectories: [...plan.createdDirectories],
+    removedDirectories: [...plan.removedDirectories],
     manifestPath: plan.manifestPath,
   }
 }
@@ -76,7 +77,9 @@ export function applyResultToJson(result: ApplyResult): Record<string, JsonValue
         status: 'applied',
         transactionId: result.transactionId,
         appliedPaths: [...result.appliedPaths],
+        removedPaths: [...result.removedPaths],
         createdDirectories: [...result.createdDirectories],
+        removedDirectories: [...result.removedDirectories],
         durability: result.durability,
         diagnostics: result.diagnostics.map((diagnostic) => ({
           ...diagnostic,

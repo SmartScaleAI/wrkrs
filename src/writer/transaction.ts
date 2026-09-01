@@ -7,7 +7,12 @@ import {
   type TransactionDurability,
   type TransactionJournal,
 } from '../core/ownership.js'
-import type { Conflict, InstallPlan, PlanOperation } from '../core/plan.js'
+import {
+  MUTATING_OUTCOMES,
+  type Conflict,
+  type InstallPlan,
+  type PlanOperation,
+} from '../core/plan.js'
 import {
   AtomicPublicationUnsupportedError,
   ContainmentError,
@@ -58,8 +63,12 @@ export type ApplyResult =
   | {
       readonly status: 'applied'
       readonly transactionId: string
+      /** Paths created or replaced, in application order. */
       readonly appliedPaths: readonly string[]
+      /** Paths removed, in application order. */
+      readonly removedPaths: readonly string[]
       readonly createdDirectories: readonly string[]
+      readonly removedDirectories: readonly string[]
       /** Effective durability of the whole transaction, including bookkeeping cleanup. */
       readonly durability: TransactionDurability
       readonly diagnostics: readonly Diagnostic[]
@@ -177,17 +186,45 @@ class BookkeepingLedger {
   }
 }
 
-function orderedCreates(plan: InstallPlan): PlanOperation[] {
-  const creates = plan.operations.filter((operation) => operation.outcome === 'create')
-  const manifest = creates.filter((operation) => operation.sourceId === MANIFEST_SOURCE_ID)
-  const others = creates
-    .filter((operation) => operation.sourceId !== MANIFEST_SOURCE_ID)
-    .sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0))
-  return [...others, ...manifest]
+const byPath = (a: PlanOperation, b: PlanOperation): number =>
+  a.path < b.path ? -1 : a.path > b.path ? 1 : 0
+
+/**
+ * Deterministic application order: content first, removals next, and the
+ * ownership manifest last, so an interrupted transaction always leaves a
+ * manifest that still describes everything wrkrs owns.
+ */
+function orderedMutations(plan: InstallPlan): PlanOperation[] {
+  const mutations = plan.operations.filter((operation) =>
+    MUTATING_OUTCOMES.includes(operation.outcome),
+  )
+  const manifest = mutations.filter((operation) => operation.sourceId === MANIFEST_SOURCE_ID)
+  const rest = mutations.filter((operation) => operation.sourceId !== MANIFEST_SOURCE_ID)
+  const writes = rest
+    .filter((operation) => operation.outcome === 'create' || operation.outcome === 'replace')
+    .sort(byPath)
+  const removals = rest.filter((operation) => operation.outcome === 'remove').sort(byPath)
+  return [...writes, ...removals, ...manifest]
+}
+
+const JOURNAL_KIND: Record<'create' | 'replace' | 'remove', JournalOperation['kind']> = {
+  create: 'create-file',
+  replace: 'replace-file',
+  remove: 'remove-file',
 }
 
 function stagingNameFor(path: string, transactionId: string): string {
   return `.${baseName(path)}.wrkrs-${transactionId.slice(0, 8)}.tmp`
+}
+
+/**
+ * Sibling name holding a hard link to a file about to be replaced or removed.
+ * It lives in the target's own directory so restoring is a single atomic
+ * rename inside one bound directory, and it keeps the original inode, so a
+ * restore returns the exact bytes and mode that were there before.
+ */
+function backupNameFor(path: string, transactionId: string): string {
+  return `.${baseName(path)}.wrkrs-${transactionId.slice(0, 8)}.bak`
 }
 
 function describeFailure(error: unknown): string {
@@ -226,6 +263,31 @@ function conflictFor(error: unknown, path: string): Conflict | null {
   return null
 }
 
+function stagingNameTakenConflict(stagingPath: string): Conflict {
+  return conflict(
+    'PRECONDITION',
+    'PRECONDITION_STAGING_NAME_TAKEN',
+    stagingPath,
+    `"${stagingPath}" already exists and was not created by this transaction; wrkrs did not overwrite it`,
+    'Remove or rename that entry, then run the command again',
+  )
+}
+
+/**
+ * The sibling name a replacement or removal uses to keep the previous entry
+ * alive is occupied by something wrkrs did not create. Nothing is replaced or
+ * removed, because the original could not be preserved first.
+ */
+function backupNameTakenConflict(backupPath: string): Conflict {
+  return conflict(
+    'PRECONDITION',
+    'PRECONDITION_BACKUP_NAME_TAKEN',
+    backupPath,
+    `"${backupPath}" already exists and was not created by this transaction; wrkrs did not overwrite it and changed nothing`,
+    'Remove or rename that entry, then run the command again',
+  )
+}
+
 export function containmentUnsupportedConflict(reason: string): Conflict {
   return conflict(
     'ENVIRONMENT',
@@ -262,13 +324,15 @@ export async function applyPlan(input: ApplyInput, ports: WriterPorts): Promise<
   if (!fs.containment.supported) {
     return { status: 'aborted', conflicts: [containmentUnsupportedConflict(fs.containment.reason)] }
   }
-  const creates = orderedCreates(plan)
-  if (creates.length === 0) {
+  const mutations = orderedMutations(plan)
+  if (mutations.length === 0 && plan.removedDirectories.length === 0) {
     return {
       status: 'applied',
       transactionId: '',
       appliedPaths: [],
+      removedPaths: [],
       createdDirectories: [],
+      removedDirectories: [],
       durability: 'strict',
       diagnostics: [],
     }
@@ -564,22 +628,35 @@ export async function applyPlan(input: ApplyInput, ports: WriterPorts): Promise<
   const journalOperations: JournalOperation[] = []
   const listedDirectories = new Set<string>()
   if (wrkrsCreated) listedDirectories.add(WRKRS_DIRECTORY)
-  for (const operation of creates) {
+  for (const operation of mutations) {
     for (const ancestor of ancestorDirectories(operation.path)) {
       if (plan.createdDirectories.includes(ancestor) && !listedDirectories.has(ancestor)) {
         journalOperations.push(plannedOperation(ancestor, 'create-directory'))
         listedDirectories.add(ancestor)
       }
     }
-    journalOperations.push(
-      plannedOperation(operation.path, 'create-file', 'planned', operation.proposedHash),
-    )
+    const kind = JOURNAL_KIND[operation.outcome as 'create' | 'replace' | 'remove']
+    // A removal has no proposed content: its expected hash is the content that
+    // must still be there for the removal to be allowed at all.
+    const expectedHash =
+      operation.outcome === 'remove'
+        ? operation.expected.kind === 'file'
+          ? operation.expected.hash
+          : null
+        : operation.proposedHash
+    journalOperations.push(plannedOperation(operation.path, kind, 'planned', expectedHash))
+  }
+  // Directory removals are journaled for the record; they run after the
+  // transaction commits, once every backup inside them has been released.
+  for (const directory of plan.removedDirectories) {
+    journalOperations.push(plannedOperation(directory, 'remove-directory'))
   }
 
   let journal: TransactionJournal = createJournal({
     transactionId,
     planDigest: plan.digest,
     startedAt,
+    command: plan.command,
     operations: journalOperations,
   })
   const persist = async (next: TransactionJournal): Promise<TransactionJournal> => {
@@ -639,6 +716,7 @@ export async function applyPlan(input: ApplyInput, ports: WriterPorts): Promise<
   }
 
   const appliedPaths: string[] = []
+  const removedPaths: string[] = []
   const createdDirectories: string[] = wrkrsCreated ? [WRKRS_DIRECTORY] : []
   const created = new Set(createdDirectories)
 
@@ -649,10 +727,307 @@ export async function applyPlan(input: ApplyInput, ports: WriterPorts): Promise<
     journal = await persist(journal)
   }
 
+  /** Records journal state after the commit point, where persistence can no longer fail the run. */
+  const saveQuietly = async (next: TransactionJournal): Promise<void> => {
+    journal = next
+    try {
+      journal = await persist(journal)
+    } catch {
+      // The committed result stands; the live journal keeps its last state.
+    }
+  }
+
   /** Syncs a directory; an I/O error propagates as a transaction failure. */
   const syncDirectory = async (directory: string): Promise<void> => {
     const sync = await inDirectory(directory, (bound) => bound.sync())
     journal = withDurability(journal, sync)
+  }
+
+  /**
+   * Creates a new file: stage under an exclusive name, publish the target
+   * atomically without ever replacing an existing entry, prove the staging
+   * name gone, then verify the published bytes.
+   */
+  const applyCreate = async (operation: PlanOperation): Promise<void> => {
+    const bytes = operation.proposedBytes
+    if (!bytes || operation.proposedHash === null || operation.mode === null) {
+      throw new TransactionFailure(`Operation for ${operation.path} carries no content`)
+    }
+    const expectedHash = operation.proposedHash
+    const directory = parentDirectory(operation.path) ?? ''
+    const targetName = baseName(operation.path)
+    const stagingName = stagingNameFor(operation.path, transactionId)
+    const stagingPath = directory === '' ? stagingName : `${directory}/${stagingName}`
+    const mode = operation.mode
+
+    // 1. Announce the staging name before anything can create it, then
+    //    stage: full content written and fsynced under that name.
+    await advance(
+      withOperation(journal, operation.path, { status: 'staging', stagingPath, expectedHash }),
+    )
+    try {
+      await inDirectory(directory, (bound) => bound.writeFileExclusive(stagingName, bytes, mode))
+    } catch (error) {
+      if (error instanceof FileSystemError && error.code === 'EEXIST') {
+        // Someone else owns that name: forget it so rollback never touches it.
+        journal = withOperation(journal, operation.path, {
+          status: 'planned',
+          stagingPath: null,
+          note: 'staging name was already taken by another entry; it was left untouched',
+        })
+        throw new TransactionFailure(
+          `Precondition failed: staging name for "${operation.path}" was already taken; the existing entry was left untouched`,
+          {
+            conflict: conflict(
+              'PRECONDITION',
+              'PRECONDITION_STAGING_NAME_TAKEN',
+              stagingPath,
+              `"${stagingPath}" already exists and was not created by this transaction; wrkrs did not overwrite it`,
+              'Remove or rename that entry, then run `wrkrs init` again',
+            ),
+          },
+        )
+      }
+      if (error instanceof FileSystemError || error instanceof ContainmentError) {
+        // The exclusive create itself failed, so nothing was created under
+        // the staging name; forget it so rollback never touches that name.
+        journal = withOperation(journal, operation.path, {
+          status: 'planned',
+          stagingPath: null,
+          note: 'staging write failed before the entry was created',
+        })
+      }
+      // Otherwise (ExclusiveWriteError: entry created, content incomplete)
+      // the journal keeps the staging path and rollback reconciles it.
+      throw error
+    }
+    await advance(withOperation(journal, operation.path, { status: 'staged' }))
+
+    // 2. Publish: create the target name atomically; never replace an existing entry.
+    try {
+      await inDirectory(directory, (bound) => bound.linkExclusive(stagingName, targetName))
+    } catch (error) {
+      if (error instanceof FileSystemError && error.code === 'EEXIST') {
+        journal = withOperation(journal, operation.path, {
+          note: 'target appeared before publication; the existing entry was left untouched',
+        })
+        throw new TransactionFailure(
+          `Precondition failed: "${operation.path}" appeared before publication; the existing entry was left untouched`,
+          {
+            conflict: conflict(
+              'PRECONDITION',
+              'PRECONDITION_TARGET_APPEARED',
+              operation.path,
+              `"${operation.path}" was created by another process during apply; wrkrs did not overwrite it`,
+              'Review the file, then run `wrkrs init --dry-run` again',
+            ),
+          },
+        )
+      }
+      throw error
+    }
+    // The target may now exist: record it before anything fallible happens.
+    journal = withOperation(journal, operation.path, { status: 'published' })
+    await syncDirectory(directory)
+    await advance(journal)
+
+    // 3. Remove the staging name, prove it gone, sync the directory, and
+    //    only then let the journal forget it.
+    const cleanupSync = await inDirectory(directory, async (bound) => {
+      try {
+        await bound.unlink(stagingName)
+      } catch (error) {
+        if (!(error instanceof FileSystemError && error.code === 'ENOENT')) throw error
+      }
+      if (await bound.lstat(stagingName)) {
+        throw new TransactionFailure(`Staging file for ${operation.path} could not be removed`)
+      }
+      return bound.sync()
+    })
+    journal = withDurability(
+      withOperation(journal, operation.path, { stagingPath: null }),
+      cleanupSync,
+    )
+    await advance(journal)
+
+    // 4. Verify the published bytes through the bound directory.
+    const written = await inDirectory(directory, (bound) => bound.readFile(targetName))
+    const appliedHash = sha256(written)
+    if (appliedHash !== expectedHash) {
+      throw new TransactionFailure(
+        `Post-write verification failed for ${operation.path}: content hash does not match the plan`,
+      )
+    }
+    appliedPaths.push(operation.path)
+    journal = withOperation(journal, operation.path, { status: 'applied', appliedHash })
+    await advance(journal)
+  }
+
+  /**
+   * Replaces a file wrkrs already owns. The previous entry is hard-linked to a
+   * sibling backup name before anything is overwritten, so rollback restores
+   * the exact inode; the backup is released only once the whole transaction
+   * has validated. Publication is a rename over the target, which is atomic
+   * and, unlike creation, deliberately replaces the entry the manifest proves
+   * wrkrs wrote.
+   */
+  const applyReplace = async (operation: PlanOperation): Promise<void> => {
+    const bytes = operation.proposedBytes
+    if (!bytes || operation.proposedHash === null || operation.mode === null) {
+      throw new TransactionFailure(`Operation for ${operation.path} carries no content`)
+    }
+    if (operation.expected.kind !== 'file') {
+      throw new TransactionFailure(`Replacement for ${operation.path} has no expected file state`)
+    }
+    const expectedHash = operation.proposedHash
+    const previousHash = operation.expected.hash
+    const directory = parentDirectory(operation.path) ?? ''
+    const targetName = baseName(operation.path)
+    const stagingName = stagingNameFor(operation.path, transactionId)
+    const stagingPath = directory === '' ? stagingName : `${directory}/${stagingName}`
+    const backupName = backupNameFor(operation.path, transactionId)
+    const backupPath = directory === '' ? backupName : `${directory}/${backupName}`
+    const mode = operation.mode
+
+    // 1. Stage the new content under an exclusive name.
+    await advance(
+      withOperation(journal, operation.path, { status: 'staging', stagingPath, expectedHash }),
+    )
+    try {
+      await inDirectory(directory, (bound) => bound.writeFileExclusive(stagingName, bytes, mode))
+    } catch (error) {
+      if (error instanceof FileSystemError && error.code === 'EEXIST') {
+        journal = withOperation(journal, operation.path, {
+          status: 'planned',
+          stagingPath: null,
+          note: 'staging name was already taken by another entry; it was left untouched',
+        })
+        throw new TransactionFailure(
+          `Precondition failed: staging name for "${operation.path}" was already taken; the existing entry was left untouched`,
+          { conflict: stagingNameTakenConflict(stagingPath) },
+        )
+      }
+      if (error instanceof FileSystemError || error instanceof ContainmentError) {
+        journal = withOperation(journal, operation.path, {
+          status: 'planned',
+          stagingPath: null,
+          note: 'staging write failed before the entry was created',
+        })
+      }
+      throw error
+    }
+    await advance(withOperation(journal, operation.path, { status: 'staged' }))
+
+    // 2. Back up the current entry by hard link, announcing the name first so
+    //    no failure can hide it. The backup shares the original inode, so it
+    //    holds the exact previous bytes and mode.
+    await advance(withOperation(journal, operation.path, { backupPath, backupHash: previousHash }))
+    try {
+      await inDirectory(directory, (bound) => bound.linkExclusive(targetName, backupName))
+    } catch (error) {
+      if (error instanceof FileSystemError && error.code === 'EEXIST') {
+        journal = withOperation(journal, operation.path, {
+          backupPath: null,
+          backupHash: null,
+          note: 'backup name was already taken by another entry; it was left untouched',
+        })
+        throw new TransactionFailure(
+          `Precondition failed: backup name for "${operation.path}" was already taken; nothing was replaced`,
+          { conflict: backupNameTakenConflict(backupPath) },
+        )
+      }
+      if (error instanceof FileSystemError || error instanceof ContainmentError) {
+        journal = withOperation(journal, operation.path, {
+          backupPath: null,
+          backupHash: null,
+          note: 'backup link failed before the entry was created',
+        })
+      }
+      throw error
+    }
+    journal = withOperation(journal, operation.path, { status: 'backed-up' })
+    await syncDirectory(directory)
+    await advance(journal)
+
+    // 3. Publish: rename the staging entry over the target. The rename
+    //    consumes the staging name, so nothing is left to clean up.
+    await inDirectory(directory, (bound) => bound.rename(stagingName, targetName))
+    journal = withOperation(journal, operation.path, { status: 'published', stagingPath: null })
+    await syncDirectory(directory)
+    await advance(journal)
+
+    // 4. Verify the published bytes through the bound directory.
+    const written = await inDirectory(directory, (bound) => bound.readFile(targetName))
+    const appliedHash = sha256(written)
+    if (appliedHash !== expectedHash) {
+      throw new TransactionFailure(
+        `Post-write verification failed for ${operation.path}: content hash does not match the plan`,
+      )
+    }
+    appliedPaths.push(operation.path)
+    journal = withOperation(journal, operation.path, { status: 'applied', appliedHash })
+    await advance(journal)
+  }
+
+  /**
+   * Removes a file wrkrs owns. The entry is hard-linked to a sibling backup
+   * before it is unlinked, so the content survives until the transaction
+   * commits and rollback can restore the exact inode.
+   */
+  const applyRemove = async (operation: PlanOperation): Promise<void> => {
+    if (operation.expected.kind !== 'file') {
+      throw new TransactionFailure(`Removal of ${operation.path} has no expected file state`)
+    }
+    const previousHash = operation.expected.hash
+    const directory = parentDirectory(operation.path) ?? ''
+    const targetName = baseName(operation.path)
+    const backupName = backupNameFor(operation.path, transactionId)
+    const backupPath = directory === '' ? backupName : `${directory}/${backupName}`
+
+    // 1. Back up by hard link, announcing the name before creating it.
+    await advance(withOperation(journal, operation.path, { backupPath, backupHash: previousHash }))
+    try {
+      await inDirectory(directory, (bound) => bound.linkExclusive(targetName, backupName))
+    } catch (error) {
+      if (error instanceof FileSystemError && error.code === 'EEXIST') {
+        journal = withOperation(journal, operation.path, {
+          backupPath: null,
+          backupHash: null,
+          note: 'backup name was already taken by another entry; it was left untouched',
+        })
+        throw new TransactionFailure(
+          `Precondition failed: backup name for "${operation.path}" was already taken; nothing was removed`,
+          { conflict: backupNameTakenConflict(backupPath) },
+        )
+      }
+      if (error instanceof FileSystemError || error instanceof ContainmentError) {
+        journal = withOperation(journal, operation.path, {
+          backupPath: null,
+          backupHash: null,
+          note: 'backup link failed before the entry was created',
+        })
+      }
+      throw error
+    }
+    journal = withOperation(journal, operation.path, { status: 'backed-up' })
+    await syncDirectory(directory)
+    await advance(journal)
+
+    // 2. Unlink the target and prove it absent before recording the removal.
+    await inDirectory(directory, async (bound) => {
+      try {
+        await bound.unlink(targetName)
+      } catch (error) {
+        if (!(error instanceof FileSystemError && error.code === 'ENOENT')) throw error
+      }
+      if (await bound.lstat(targetName)) {
+        throw new TransactionFailure(`${operation.path} is still present after removal`)
+      }
+    })
+    journal = withOperation(journal, operation.path, { status: 'removed' })
+    await syncDirectory(directory)
+    await advance(journal)
+    removedPaths.push(operation.path)
   }
 
   let failingPath: string | null = null
@@ -660,7 +1035,7 @@ export async function applyPlan(input: ApplyInput, ports: WriterPorts): Promise<
   try {
     await advance(withStatus(journal, 'applying'))
 
-    for (const operation of creates) {
+    for (const operation of mutations) {
       for (const ancestor of ancestorDirectories(operation.path)) {
         if (!plan.createdDirectories.includes(ancestor) || created.has(ancestor)) continue
         failingPath = ancestor
@@ -676,118 +1051,9 @@ export async function applyPlan(input: ApplyInput, ports: WriterPorts): Promise<
       }
 
       failingPath = operation.path
-      const bytes = operation.proposedBytes
-      if (!bytes || operation.proposedHash === null || operation.mode === null) {
-        throw new TransactionFailure(`Operation for ${operation.path} carries no content`)
-      }
-      const expectedHash = operation.proposedHash
-      const directory = parentDirectory(operation.path) ?? ''
-      const targetName = baseName(operation.path)
-      const stagingName = stagingNameFor(operation.path, transactionId)
-      const stagingPath = directory === '' ? stagingName : `${directory}/${stagingName}`
-      const mode = operation.mode
-
-      // 1. Announce the staging name before anything can create it, then
-      //    stage: full content written and fsynced under that name.
-      await advance(
-        withOperation(journal, operation.path, { status: 'staging', stagingPath, expectedHash }),
-      )
-      try {
-        await inDirectory(directory, (bound) => bound.writeFileExclusive(stagingName, bytes, mode))
-      } catch (error) {
-        if (error instanceof FileSystemError && error.code === 'EEXIST') {
-          // Someone else owns that name: forget it so rollback never touches it.
-          journal = withOperation(journal, operation.path, {
-            status: 'planned',
-            stagingPath: null,
-            note: 'staging name was already taken by another entry; it was left untouched',
-          })
-          throw new TransactionFailure(
-            `Precondition failed: staging name for "${operation.path}" was already taken; the existing entry was left untouched`,
-            {
-              conflict: conflict(
-                'PRECONDITION',
-                'PRECONDITION_STAGING_NAME_TAKEN',
-                stagingPath,
-                `"${stagingPath}" already exists and was not created by this transaction; wrkrs did not overwrite it`,
-                'Remove or rename that entry, then run `wrkrs init` again',
-              ),
-            },
-          )
-        }
-        if (error instanceof FileSystemError || error instanceof ContainmentError) {
-          // The exclusive create itself failed, so nothing was created under
-          // the staging name; forget it so rollback never touches that name.
-          journal = withOperation(journal, operation.path, {
-            status: 'planned',
-            stagingPath: null,
-            note: 'staging write failed before the entry was created',
-          })
-        }
-        // Otherwise (ExclusiveWriteError: entry created, content incomplete)
-        // the journal keeps the staging path and rollback reconciles it.
-        throw error
-      }
-      await advance(withOperation(journal, operation.path, { status: 'staged' }))
-
-      // 2. Publish: create the target name atomically; never replace an existing entry.
-      try {
-        await inDirectory(directory, (bound) => bound.linkExclusive(stagingName, targetName))
-      } catch (error) {
-        if (error instanceof FileSystemError && error.code === 'EEXIST') {
-          journal = withOperation(journal, operation.path, {
-            note: 'target appeared before publication; the existing entry was left untouched',
-          })
-          throw new TransactionFailure(
-            `Precondition failed: "${operation.path}" appeared before publication; the existing entry was left untouched`,
-            {
-              conflict: conflict(
-                'PRECONDITION',
-                'PRECONDITION_TARGET_APPEARED',
-                operation.path,
-                `"${operation.path}" was created by another process during apply; wrkrs did not overwrite it`,
-                'Review the file, then run `wrkrs init --dry-run` again',
-              ),
-            },
-          )
-        }
-        throw error
-      }
-      // The target may now exist: record it before anything fallible happens.
-      journal = withOperation(journal, operation.path, { status: 'published' })
-      await syncDirectory(directory)
-      await advance(journal)
-
-      // 3. Remove the staging name, prove it gone, sync the directory, and
-      //    only then let the journal forget it.
-      const cleanupSync = await inDirectory(directory, async (bound) => {
-        try {
-          await bound.unlink(stagingName)
-        } catch (error) {
-          if (!(error instanceof FileSystemError && error.code === 'ENOENT')) throw error
-        }
-        if (await bound.lstat(stagingName)) {
-          throw new TransactionFailure(`Staging file for ${operation.path} could not be removed`)
-        }
-        return bound.sync()
-      })
-      journal = withDurability(
-        withOperation(journal, operation.path, { stagingPath: null }),
-        cleanupSync,
-      )
-      await advance(journal)
-
-      // 4. Verify the published bytes through the bound directory.
-      const written = await inDirectory(directory, (bound) => bound.readFile(targetName))
-      const appliedHash = sha256(written)
-      if (appliedHash !== expectedHash) {
-        throw new TransactionFailure(
-          `Post-write verification failed for ${operation.path}: content hash does not match the plan`,
-        )
-      }
-      appliedPaths.push(operation.path)
-      journal = withOperation(journal, operation.path, { status: 'applied', appliedHash })
-      await advance(journal)
+      if (operation.outcome === 'create') await applyCreate(operation)
+      else if (operation.outcome === 'replace') await applyReplace(operation)
+      else await applyRemove(operation)
     }
     failingPath = null
 
@@ -801,11 +1067,60 @@ export async function applyPlan(input: ApplyInput, ports: WriterPorts): Promise<
       throw new TransactionFailure(`Post-apply validation failed: ${summary}`, { diagnostics })
     }
 
+    // Commit before any backup is released: from here the new state is the
+    // one wrkrs stands behind, and a crash finds a committed journal that
+    // still names every backup it had not cleaned up yet.
     await advance(withStatus(journal, 'committed'))
+
+    // Backups kept the previous bytes alive for rollback. Now that the
+    // transaction has validated they are released; a failure here leaves a
+    // named file behind but never changes the committed result.
+    const retainedBackups: RetainedPath[] = []
+    const hadBackups = journal.operations.some((operation) => operation.backupPath !== null)
+    for (const operation of journal.operations) {
+      const backupPath = operation.backupPath
+      if (!backupPath) continue
+      const directory = parentDirectory(backupPath) ?? ''
+      const name = baseName(backupPath)
+      try {
+        const sync = await inDirectory(directory, async (bound) => {
+          try {
+            await bound.unlink(name)
+          } catch (error) {
+            if (!(error instanceof FileSystemError && error.code === 'ENOENT')) throw error
+          }
+          if (await bound.lstat(name)) {
+            throw new FileSystemError('EEXIST', name, 'still present after removal')
+          }
+          return bound.sync()
+        })
+        journal = withDurability(
+          withOperation(journal, operation.path, { backupPath: null, backupHash: null }),
+          sync,
+        )
+      } catch (error) {
+        retainedBackups.push({ path: backupPath, reason: describeFailure(error) })
+      }
+    }
+    // A plan that replaced or removed nothing has no backup to release, so it
+    // writes no extra journal revision here.
+    if (hadBackups) await saveQuietly(journal)
+
     // Only transient bookkeeping (lock, journal temporary, live journal) is
     // removed after a successful commit; the installed .wrkrs directory and
-    // its repository-owned contents stay.
+    // its repository-owned contents stay unless the plan removes them.
     await releaseBookkeeping({ keepJournalWhenRetained: false, removeCreatedDirectory: false })
+
+    // Directories the plan retires are removed last, once every backup and
+    // every bookkeeping file inside them is gone. Deepest first, empty only.
+    const removedDirectories: string[] = []
+    const retainedDirectories: RetainedPath[] = []
+    for (const directory of plan.removedDirectories) {
+      const outcome = await removeEmptyDirectory(inDirectory, directory, noteSync)
+      if (outcome === null) removedDirectories.push(directory)
+      else retainedDirectories.push(outcome)
+    }
+
     const leftovers = ledger.entries()
     let durability: TransactionDurability =
       journal.durability === 'best-effort' || bookkeeping.durability === 'best-effort'
@@ -845,11 +1160,40 @@ export async function applyPlan(input: ApplyInput, ports: WriterPorts): Promise<
         ),
       )
     }
+    for (const item of retainedBackups) {
+      diagnostics.push(
+        createDiagnostic(
+          'TRANSACTION_BACKUP_RETAINED',
+          'warning',
+          `The backup of a replaced or removed file could not be released: ${item.path} (${item.reason})`,
+          {
+            path: item.path,
+            remediation: 'Delete the file; the change it protected is already applied and verified',
+          },
+        ),
+      )
+    }
+    for (const item of retainedDirectories) {
+      diagnostics.push(
+        createDiagnostic(
+          'DIRECTORY_RETAINED',
+          'warning',
+          `Directory was left in place: ${item.path} (${item.reason})`,
+          {
+            path: item.path,
+            remediation:
+              'Review the remaining entries and remove the directory manually if it is no longer wanted',
+          },
+        ),
+      )
+    }
     return {
       status: 'applied',
       transactionId,
       appliedPaths,
+      removedPaths,
       createdDirectories,
+      removedDirectories,
       durability,
       diagnostics,
     }
@@ -952,6 +1296,52 @@ export async function applyPlan(input: ApplyInput, ports: WriterPorts): Promise<
       journalPath: JOURNAL_PATH,
       diagnostics,
     }
+  }
+}
+
+/**
+ * Removes one directory a plan retires: rmdir, verify absence, sync the
+ * parent. Returns null when the directory is gone (or was already absent) and
+ * the exact retained entry when it is not. A directory that still holds
+ * entries is never forced: it is reported and left alone.
+ */
+async function removeEmptyDirectory(
+  inDirectory: <T>(
+    directory: string,
+    operation: (bound: BoundDirectory) => Promise<T>,
+  ) => Promise<T>,
+  directory: string,
+  noteSync: (sync: DirectorySyncResult) => void,
+): Promise<RetainedPath | null> {
+  const parent = parentDirectory(directory) ?? ''
+  const name = baseName(directory)
+  try {
+    return await inDirectory(parent, async (bound) => {
+      try {
+        await bound.removeDirectory(name)
+      } catch (error) {
+        if (error instanceof FileSystemError && error.code === 'ENOENT') return null
+        if (error instanceof FileSystemError && error.code === 'ENOTEMPTY') {
+          return {
+            path: directory,
+            reason: 'the directory still holds entries wrkrs does not own',
+          }
+        }
+        return { path: directory, reason: describeFailure(error) }
+      }
+      if (await bound.lstat(name)) {
+        return { path: directory, reason: 'still present after removal' }
+      }
+      try {
+        noteSync(await bound.sync())
+      } catch {
+        return { path: directory, reason: DURABILITY_UNPROVEN }
+      }
+      return null
+    })
+  } catch (error) {
+    if (error instanceof ContainmentError && error.code === 'PATH_ANCESTOR_MISSING') return null
+    return { path: directory, reason: describeFailure(error) }
   }
 }
 

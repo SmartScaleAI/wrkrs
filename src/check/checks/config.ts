@@ -13,13 +13,27 @@ export async function checkConfig(context: CheckContext): Promise<Diagnostic[]> 
     diagnostics.push(containmentDiagnostic('CONFIG_PATH_UNSAFE', 'error', resolved.error))
     return diagnostics
   }
+  const partial = context.manifest?.state === 'partial-uninstall'
   const stat = resolved.value.stat
   if (!stat) {
+    // A partial uninstall removes configuration on purpose and records that
+    // in the manifest, so its absence is expected rather than a fault.
     diagnostics.push(
-      createDiagnostic('CONFIG_MISSING', 'error', 'No .wrkrs/config.yaml was found', {
-        path: CONFIG_PATH,
-        remediation: INIT_REMEDIATION,
-      }),
+      partial
+        ? createDiagnostic(
+            'CONFIG_REMOVED_BY_UNINSTALL',
+            'warning',
+            'No .wrkrs/config.yaml is present; a previous uninstall removed it and left a reduced manifest',
+            {
+              path: CONFIG_PATH,
+              remediation:
+                'Run `wrkrs uninstall` again to remove what remains, or `wrkrs init` to reinstall',
+            },
+          )
+        : createDiagnostic('CONFIG_MISSING', 'error', 'No .wrkrs/config.yaml was found', {
+            path: CONFIG_PATH,
+            remediation: INIT_REMEDIATION,
+          }),
     )
     return diagnostics
   }
@@ -172,6 +186,20 @@ export async function checkConfig(context: CheckContext): Promise<Diagnostic[]> 
         ),
       )
     }
+  }
+
+  if (context.manifest && context.manifest.preset.id !== config.preset.id) {
+    diagnostics.push(
+      createDiagnostic(
+        'MANIFEST_PRESET_MISMATCH',
+        'warning',
+        `Manifest preset "${context.manifest.preset.id}" differs from config preset "${config.preset.id}"`,
+        {
+          path: CONFIG_PATH,
+          remediation: 'Align the preset in config.yaml and manifest.json',
+        },
+      ),
+    )
   }
 
   if (!diagnostics.some((diagnostic) => diagnostic.severity === 'error')) {

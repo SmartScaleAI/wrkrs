@@ -111,10 +111,14 @@ export async function runCheck(input: CheckInput, ports: CheckPorts): Promise<Ch
     activeTransactionId: input.activeTransactionId ?? null,
     config: null,
     manifest: null,
+    manifestSchemaVersion: null,
   }
 
-  diagnostics.push(...(await checkConfig(context)))
+  // The manifest is read first: its state decides how a missing
+  // configuration is judged, because a partial uninstall removes config.yaml
+  // deliberately.
   diagnostics.push(...(await checkManifest(context)))
+  diagnostics.push(...(await checkConfig(context)))
   diagnostics.push(...(await checkOwnership(context)))
   diagnostics.push(...(await checkTransaction(context)))
   diagnostics.push(...(await checkAdapter(context)))

@@ -6,12 +6,14 @@ import type { OwnershipManifest, TransactionJournal } from '../core/ownership.js
 import { err, ok, type Result } from '../core/result.js'
 import { normalizeRelativePath } from '../platform/paths.js'
 import {
+  CURRENT_MANIFEST_SCHEMA_VERSION,
   isSupportedConfigSchemaVersion,
   isSupportedManifestSchemaVersion,
+  migrateManifestV1ToV2,
   SUPPORTED_CONFIG_SCHEMA_VERSIONS,
   SUPPORTED_MANIFEST_SCHEMA_VERSIONS,
 } from './migrations/index.js'
-import { configSchemaV1, journalSchemaV1, manifestSchemaV1 } from './schema.js'
+import { configSchemaV1, journalSchemaV1, manifestSchemaV1, manifestSchemaV2 } from './schema.js'
 
 /**
  * Document issues and errors carry only controlled text. Parser messages are
@@ -244,8 +246,21 @@ function parseJsonObject(
   return ok(value)
 }
 
-/** Parses and validates .wrkrs/manifest.json text. */
-export function parseManifestDocument(text: string): Result<OwnershipManifest, DocumentError> {
+/**
+ * A manifest as this wrkrs version understands it, plus the version it was
+ * read from. Parsing migrates an older document in memory; it never writes.
+ * `sourceSchemaVersion` is what a reader must report so the owner knows the
+ * file on disk is still in the older format.
+ */
+export interface ParsedManifest {
+  readonly manifest: OwnershipManifest
+  readonly sourceSchemaVersion: number
+  /** True when the document on disk is older than the current format. */
+  readonly migrated: boolean
+}
+
+/** Parses and validates .wrkrs/manifest.json text, migrating older versions in memory. */
+export function parseManifestDocument(text: string): Result<ParsedManifest, DocumentError> {
   const object = parseJsonObject(text, 'MANIFEST')
   if (!object.ok) return object
   const version = identifySchemaVersion(object.value, 'MANIFEST')
@@ -258,25 +273,47 @@ export function parseManifestDocument(text: string): Result<OwnershipManifest, D
       issues: [],
     })
   }
-  const parsed = manifestSchemaV1.safeParse(object.value)
-  if (!parsed.success) {
-    return err({
-      code: 'MANIFEST_INVALID',
-      message: 'manifest.json does not match the schema',
-      schemaVersion: version.value,
-      issues: zodIssues(parsed.error, 'MANIFEST_SCHEMA_VIOLATION'),
-    })
+  const invalid = (issues: readonly DocumentIssue[], message: string): DocumentError => ({
+    code: 'MANIFEST_INVALID',
+    message,
+    schemaVersion: version.value,
+    issues,
+  })
+
+  let manifest: OwnershipManifest
+  if (version.value === 1) {
+    const parsed = manifestSchemaV1.safeParse(object.value)
+    if (!parsed.success) {
+      return err(
+        invalid(
+          zodIssues(parsed.error, 'MANIFEST_SCHEMA_VIOLATION'),
+          'manifest.json does not match the schema',
+        ),
+      )
+    }
+    manifest = migrateManifestV1ToV2(parsed.data)
+  } else {
+    const parsed = manifestSchemaV2.safeParse(object.value)
+    if (!parsed.success) {
+      return err(
+        invalid(
+          zodIssues(parsed.error, 'MANIFEST_SCHEMA_VIOLATION'),
+          'manifest.json does not match the schema',
+        ),
+      )
+    }
+    manifest = parsed.data
   }
-  const semantic = validateManifestSemantics(parsed.data)
+
+  const semantic = validateManifestSemantics(manifest)
   if (semantic.length > 0) {
-    return err({
-      code: 'MANIFEST_INVALID',
-      message: 'manifest.json contains unsafe or duplicate paths',
-      schemaVersion: version.value,
-      issues: semantic,
-    })
+    return err(invalid(semantic, 'manifest.json contains unsafe or duplicate paths'))
   }
-  return ok(parsed.data)
+  return ok({
+    manifest,
+    sourceSchemaVersion: version.value,
+    migrated: version.value !== CURRENT_MANIFEST_SCHEMA_VERSION,
+  })
 }
 
 export function validateManifestSemantics(manifest: OwnershipManifest): DocumentIssue[] {

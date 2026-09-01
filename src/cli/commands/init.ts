@@ -94,7 +94,7 @@ export async function runInitCommand(options: InitOptions, context: CliContext):
       emitJson({ repositoryRoot: repository.root, plan: planJson, result: { status: 'no-op' } })
     else
       streams.stdout.write(
-        'wrkrs is already installed and unchanged; nothing to do. Use the planned `wrkrs update` command to change an installation.\n',
+        'wrkrs is already installed and unchanged; nothing to do. Use `wrkrs update` to change an installation.\n',
       )
     return EXIT_OK
   }
@@ -132,7 +132,7 @@ export async function runInitCommand(options: InitOptions, context: CliContext):
   if (options.json) {
     emitJson({ repositoryRoot: repository.root, plan: planJson, result: applyResultToJson(result) })
   } else {
-    streams.stdout.write(renderApplyResult(result, style))
+    streams.stdout.write(renderApplyResult(result, style, { command: 'init' }))
   }
   return result.status === 'applied' ? EXIT_OK : EXIT_ERROR
 }

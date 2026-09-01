@@ -109,7 +109,7 @@ function globalConflicts(snapshot: RepositorySnapshot): Conflict[] {
   return conflicts
 }
 
-function containmentConflict(path: string, target: TargetSnapshot): Conflict | null {
+export function containmentConflict(path: string, target: TargetSnapshot): Conflict | null {
   const ancestor = target.blockingAncestor ?? 'an ancestor'
   switch (target.containment) {
     case 'ok':
@@ -559,6 +559,7 @@ export function buildInitPlan(input: InitPlanInput): InstallPlan {
   if (needsManifest) {
     const manifest: OwnershipManifest = {
       schemaVersion: MANIFEST_SCHEMA_VERSION,
+      state: 'installed',
       installationId,
       wrkrsVersion: input.wrkrsVersion,
       installedAt: now,
@@ -625,6 +626,7 @@ export function buildInitPlan(input: InitPlanInput): InstallPlan {
     operations,
     blockers,
     createdDirectories,
+    removedDirectories: [],
     manifestPath: MANIFEST_PATH,
   }
   return { ...withoutDigest, digest: computePlanDigest(withoutDigest) }

@@ -145,7 +145,12 @@ export function renderSpecializationSection(specializations: readonly Specializa
       const evidence = specialization.evidence
         .map((item) => `${item.path} (${item.detail})`)
         .join(', ')
-      return `- **${specialization.title}** (\`${specialization.id}\`) — evidence: ${evidence}`
+      // A specialization can be declared in configuration without a current
+      // signal in the repository. It is kept and named honestly rather than
+      // dropped or given invented evidence.
+      return evidence === ''
+        ? `- **${specialization.title}** (\`${specialization.id}\`) — declared in \`.wrkrs/config.yaml\`; no supporting signal detected in this repository`
+        : `- **${specialization.title}** (\`${specialization.id}\`) — evidence: ${evidence}`
     })
     .join('\n')
 }

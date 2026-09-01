@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "installationId": "6c3f2b1a-5d4e-4f8a-9b7c-0d1e2f3a4b5c",
+  "wrkrsVersion": "0.1.0",
+  "installedAt": "2026-08-29T12:00:00.000Z",
+  "updatedAt": "2026-08-29T12:00:00.000Z",
+  "preset": {
+    "id": "product-engineering",
+    "version": 1
+  },
+  "runtimeAdapters": [
+    {
+      "id": "claude-code",
+      "version": 1
+    }
+  ],
+  "entries": [
+    {
+      "path": ".wrkrs/config.yaml",
+      "kind": "file",
+      "management": "seeded",
+      "sourceId": "wrkrs/config",
+      "sourceVersion": 1,
+      "lastAppliedHash": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+    }
+  ],
+  "createdDirectories": [".wrkrs"]
+}

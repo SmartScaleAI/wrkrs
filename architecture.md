@@ -1,6 +1,6 @@
 # wrkrs CLI architecture
 
-Status: Approved by the owner on 2026-08-29; first vertical slice implemented  
+Status: Approved by the owner on 2026-08-29; first vertical slice implemented; second increment proposed in mvp.md and decisions.md A-021  
 Architecture review date: 2026-08-29
 
 ## Context
@@ -260,6 +260,8 @@ The manifest itself is implicitly managed and is not included as a self-hashed e
 
 The manifest is written only as part of a validated transaction. A directory is removable only if wrkrs created it and it is empty at removal time.
 
+Schema version 2, proposed with the second increment in decisions.md A-021, adds one required field, `state`, whose value is `installed` or `partial-uninstall`. A version 1 manifest migrates to version 2 by setting `installed`. check reads version 1 and reports it as migratable without migrating it.
+
 ### Update and uninstall behavior
 
 Update and uninstall use the same analyzer, desired-state compiler, planner, diff renderer, and transactional writer as init.
@@ -288,7 +290,17 @@ Uninstall rules:
 7. If conflicts remain, retain a reduced manifest in partial-uninstall state so a later retry is safe.
 8. A force option, if added, must list exact affected paths, create recoverable backups, and require explicit confirmation.
 
-No update or uninstall command is part of the first vertical slice, but their safety semantics are fixed before init writes its first manifest.
+No update or uninstall command was part of the first vertical slice; their safety semantics were fixed before init wrote its first manifest. The second increment implements them under exactly those rules. mvp.md carries the command surface, the desired-state sources, and acceptance tests 42 through 73; decisions.md A-021 records the choices implementation forces.
+
+Implementing them extends the writer with three operations beside exclusive create:
+
+| Operation | Apply | Rollback |
+| --- | --- | --- |
+| replace-file | Stage new content, back up prior bytes and mode inside .wrkrs, publish by rename | Restore the backup |
+| remove-file | Back up bytes and mode, then unlink | Restore the backup |
+| remove-directory | Remove a manifest-created directory, only when empty, deepest first | Recreate it |
+
+Exclusive creation keeps its no-replace contract unchanged: it still refuses to replace an existing target. Replacement and removal are separate, explicitly planned operations that may target only a path the manifest already owns and whose current hash matched at precondition recheck. Creation is safe because the path is unoccupied; replacement is safe because the manifest proves wrkrs wrote the exact bytes still present.
 
 ### Testing strategy
 

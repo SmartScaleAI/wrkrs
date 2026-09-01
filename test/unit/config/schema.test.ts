@@ -132,7 +132,8 @@ describe('config loading', () => {
 
 describe('manifest loading', () => {
   const manifest: OwnershipManifest = {
-    schemaVersion: 1,
+    schemaVersion: 2,
+    state: 'installed',
     installationId: '00000000-0000-4000-8000-000000000001',
     wrkrsVersion: '0.1.0',
     installedAt: '2026-08-29T12:00:00.000Z',
@@ -155,7 +156,29 @@ describe('manifest loading', () => {
   it('round-trips a serialized manifest', () => {
     const text = serializeManifest(manifest)
     expect(text.endsWith('}\n')).toBe(true)
-    expect(parseManifestDocument(text)).toEqual({ ok: true, value: manifest })
+    expect(parseManifestDocument(text)).toEqual({
+      ok: true,
+      value: { manifest, sourceSchemaVersion: 2, migrated: false },
+    })
+  })
+
+  it('migrates a version 1 manifest in memory and reports the version on disk', () => {
+    const { state: _state, schemaVersion: _version, ...body } = manifest
+    const parsed = parseManifestDocument(JSON.stringify({ schemaVersion: 1, ...body }))
+    expect(parsed.ok).toBe(true)
+    if (!parsed.ok) return
+    // Version 1 could only describe a complete installation, so the migration
+    // is total and the in-memory manifest is a full version 2 document.
+    expect(parsed.value.manifest).toEqual(manifest)
+    expect(parsed.value.sourceSchemaVersion).toBe(1)
+    expect(parsed.value.migrated).toBe(true)
+  })
+
+  it('rejects a version 1 manifest that carries a version 2 field', () => {
+    const { schemaVersion: _version, ...body } = manifest
+    const parsed = parseManifestDocument(JSON.stringify({ schemaVersion: 1, ...body }))
+    expect(parsed.ok).toBe(false)
+    if (!parsed.ok) expect(parsed.error.code).toBe('MANIFEST_INVALID')
   })
 
   it('rejects unsafe or duplicate entry paths and unsupported versions', () => {
@@ -197,7 +220,7 @@ describe('manifest loading', () => {
         true,
       )
 
-    const unsupported = parseManifestDocument(JSON.stringify({ ...manifest, schemaVersion: 2 }))
+    const unsupported = parseManifestDocument(JSON.stringify({ ...manifest, schemaVersion: 3 }))
     expect(unsupported.ok).toBe(false)
     if (!unsupported.ok) expect(unsupported.error.code).toBe('MANIFEST_SCHEMA_VERSION_UNSUPPORTED')
 

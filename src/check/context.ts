@@ -19,6 +19,8 @@ export interface CheckContext {
   readonly activeTransactionId: string | null
   config: WrkrsConfig | null
   manifest: OwnershipManifest | null
+  /** Schema version of the manifest as it exists on disk, before migration. */
+  manifestSchemaVersion: number | null
 }
 
 /** Turns a containment failure into a stable diagnostic that never echoes file content. */

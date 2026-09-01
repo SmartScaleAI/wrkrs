@@ -3,6 +3,7 @@ import { Command, CommanderError } from 'commander'
 import { EXIT_ERROR, EXIT_OK, EXIT_USAGE, isWrkrsError } from '../core/errors.js'
 import { runCheckCommand } from './commands/check.js'
 import { runInitCommand } from './commands/init.js'
+import { runUninstallCommand, runUpdateCommand } from './commands/lifecycle.js'
 import type { CliContext, CliServices, CliStreams } from './context.js'
 import { createStyler } from './output/human-reporter.js'
 
@@ -42,6 +43,38 @@ function buildProgram(options: RunCliOptions, exit: { code: number }): Command {
     .option('--cwd <directory>', 'directory inside the target Git worktree', options.defaultCwd)
     .action(async (flags: { dryRun: boolean; yes: boolean; json: boolean; cwd: string }) => {
       exit.code = await runInitCommand(
+        { dryRun: flags.dryRun, yes: flags.yes, json: flags.json, cwd: flags.cwd },
+        context(flags.json),
+      )
+    })
+
+  program
+    .command('update')
+    .description(
+      'Reconcile the installation with this wrkrs version and .wrkrs/config.yaml, preserving anything you changed.',
+    )
+    .option('--dry-run', 'show the plan and diffs without writing anything', false)
+    .option('-y, --yes', 'apply without an interactive confirmation', false)
+    .option('--json', 'emit the semantic plan and result as JSON (no terminal styling)', false)
+    .option('--cwd <directory>', 'directory inside the target Git worktree', options.defaultCwd)
+    .action(async (flags: { dryRun: boolean; yes: boolean; json: boolean; cwd: string }) => {
+      exit.code = await runUpdateCommand(
+        { dryRun: flags.dryRun, yes: flags.yes, json: flags.json, cwd: flags.cwd },
+        context(flags.json),
+      )
+    })
+
+  program
+    .command('uninstall')
+    .description(
+      'Remove what wrkrs installed and still recognizes, preserving anything you changed.',
+    )
+    .option('--dry-run', 'show the plan and diffs without writing anything', false)
+    .option('-y, --yes', 'apply without an interactive confirmation', false)
+    .option('--json', 'emit the semantic plan and result as JSON (no terminal styling)', false)
+    .option('--cwd <directory>', 'directory inside the target Git worktree', options.defaultCwd)
+    .action(async (flags: { dryRun: boolean; yes: boolean; json: boolean; cwd: string }) => {
+      exit.code = await runUninstallCommand(
         { dryRun: flags.dryRun, yes: flags.yes, json: flags.json, cwd: flags.cwd },
         context(flags.json),
       )

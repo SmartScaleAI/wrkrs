@@ -6,7 +6,7 @@ import { ancestorDirectories } from '../platform/paths.js'
 import { conflict } from '../planner/conflicts.js'
 
 const REPLAN =
-  'The repository changed after planning; run `wrkrs init --dry-run` again and review the new plan'
+  'The repository changed after planning; run the same command with --dry-run again and review the new plan'
 
 /**
  * Re-reads every operation target immediately before (and again after) the
@@ -121,6 +121,66 @@ export async function recheckPreconditions(
             'PRECONDITION_TARGET_CHANGED',
             operation.path,
             `"${operation.path}" appeared after planning (${resolved.value.stat.kind})`,
+            REPLAN,
+          ),
+        )
+      }
+    } else if (operation.outcome === 'replace' || operation.outcome === 'remove') {
+      // A file wrkrs owns may only be replaced or removed while it still holds
+      // the exact bytes planning saw. Its ancestors must already exist: these
+      // operations never create a directory.
+      for (const ancestor of ancestorDirectories(operation.path)) {
+        await checkAncestor(ancestor, operation.path)
+      }
+      const expected = operation.expected
+      if (expected.kind !== 'file') {
+        conflicts.push(
+          conflict(
+            'PRECONDITION',
+            'PRECONDITION_TARGET_CHANGED',
+            operation.path,
+            `"${operation.path}" was not planned from a regular file`,
+            REPLAN,
+          ),
+        )
+        continue
+      }
+      const resolved = await reader.resolve(operation.path)
+      if (!resolved.ok) {
+        conflicts.push(
+          conflict(
+            'PATH',
+            'PATH_ANCESTOR_CHANGED',
+            operation.path,
+            `${resolved.error.message}; nothing was written`,
+            REPLAN,
+          ),
+        )
+        continue
+      }
+      const stat = resolved.value.stat
+      if (!stat || stat.kind !== 'file') {
+        conflicts.push(
+          conflict(
+            'PRECONDITION',
+            'PRECONDITION_TARGET_CHANGED',
+            operation.path,
+            stat
+              ? `"${operation.path}" is now a ${stat.kind}, not the regular file that was planned`
+              : `"${operation.path}" no longer exists`,
+            REPLAN,
+          ),
+        )
+        continue
+      }
+      const bytes = await reader.readBytes(operation.path)
+      if (!bytes.ok || bytes.value === null || sha256(bytes.value) !== expected.hash) {
+        conflicts.push(
+          conflict(
+            'PRECONDITION',
+            'PRECONDITION_TARGET_CHANGED',
+            operation.path,
+            `"${operation.path}" changed after planning; wrkrs never ${operation.outcome === 'remove' ? 'removes' : 'overwrites'} content it did not plan against`,
             REPLAN,
           ),
         )

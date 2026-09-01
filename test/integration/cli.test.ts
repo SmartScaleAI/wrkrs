@@ -41,6 +41,16 @@ const GENERATED = [
   '.wrkrs/schema.json',
 ]
 
+/** Adds a specialization so a lifecycle command has something to reconcile. */
+function editConfig(root: string): void {
+  const file = path.join(root, '.wrkrs', 'config.yaml')
+  const text = readFileSync(file, 'utf8')
+  writeFileSync(
+    file,
+    text.replace('        - typescript\n', '        - typescript\n        - rust\n'),
+  )
+}
+
 function fixture(name: 'clean-repository' | 'existing-claude-repository'): string {
   const root = createFixtureRepository(name, { commit: true })
   cleanup.push(root)
@@ -230,6 +240,87 @@ describe('compiled CLI', () => {
     expect(run.code).toBe(1)
     expect(run.stderr).toContain('INIT_CONFIRMATION_REQUIRED')
     expect(hashTree(root)).toBe(before)
+  })
+
+  it('46: refuses an unconfirmed non-interactive update or uninstall', async () => {
+    const root = fixture('clean-repository')
+    expect((await runCompiledCli(['init', '--yes'], { cwd: root })).code).toBe(0)
+    editConfig(root)
+    const before = hashTree(root)
+
+    const update = await runCompiledCli(['update'], { cwd: root })
+    expect(update.code).toBe(1)
+    expect(update.stderr).toContain('UPDATE_CONFIRMATION_REQUIRED')
+    expect(hashTree(root)).toBe(before)
+
+    const uninstall = await runCompiledCli(['uninstall'], { cwd: root })
+    expect(uninstall.code).toBe(1)
+    expect(uninstall.stderr).toContain('UNINSTALL_CONFIRMATION_REQUIRED')
+    expect(hashTree(root)).toBe(before)
+  })
+
+  it('47: update and uninstall dry runs change no byte and show exact diffs', async () => {
+    const root = fixture('clean-repository')
+    expect((await runCompiledCli(['init', '--yes'], { cwd: root })).code).toBe(0)
+    editConfig(root)
+    const before = hashTree(root)
+
+    const update = await runCompiledCli(['update', '--dry-run'], { cwd: root })
+    expect(update.code).toBe(0)
+    expect(update.stdout).toContain('wrkrs update (dry run)')
+    expect(update.stdout).toContain('--- a/.claude/agents/wrkrs-software-engineer.md')
+    expect(update.stdout).toContain('+++ b/.claude/agents/wrkrs-software-engineer.md')
+    expect(update.stdout).toContain('Dry run: nothing was written.')
+    expect(hashTree(root)).toBe(before)
+
+    const uninstall = await runCompiledCli(['uninstall', '--dry-run'], { cwd: root })
+    expect(uninstall.code).toBe(0)
+    expect(uninstall.stdout).toContain('wrkrs uninstall (dry run)')
+    // A removal is shown as a complete deletion against /dev/null.
+    expect(uninstall.stdout).toContain('+++ /dev/null')
+    expect(hashTree(root)).toBe(before)
+  })
+
+  it('45: update and uninstall refuse while a lock is present', async () => {
+    const root = fixture('clean-repository')
+    expect((await runCompiledCli(['init', '--yes'], { cwd: root })).code).toBe(0)
+    writeFileSync(path.join(root, '.wrkrs', '.lock'), '{}\n')
+    const before = hashTree(root)
+    for (const command of ['update', 'uninstall']) {
+      const run = await runCompiledCli([command, '--yes'], { cwd: root })
+      expect(run.code).toBe(1)
+      expect(run.stderr).toContain('OWNERSHIP_LOCK_PRESENT')
+    }
+    expect(hashTree(root)).toBe(before)
+  })
+
+  it('55: update --json emits a stable plan with no terminal styling', async () => {
+    const root = fixture('clean-repository')
+    expect((await runCompiledCli(['init', '--yes'], { cwd: root })).code).toBe(0)
+    editConfig(root)
+    const run = await runCompiledCli(['update', '--json', '--dry-run'], { cwd: root })
+    expect(run.code).toBe(0)
+    expect(ANSI_PATTERN.test(run.stdout)).toBe(false)
+    const payload = JSON.parse(run.stdout) as {
+      command: string
+      plan: { command: string; digest: string; removedDirectories: string[] }
+    }
+    expect(payload.command).toBe('update')
+    expect(payload.plan.command).toBe('update')
+    expect(payload.plan.digest.startsWith('sha256:')).toBe(true)
+    expect(payload.plan.removedDirectories).toEqual([])
+  })
+
+  it('a full lifecycle round trip restores the repository exactly', async () => {
+    const root = fixture('existing-claude-repository')
+    const before = readTree(root)
+    expect((await runCompiledCli(['init', '--yes'], { cwd: root })).code).toBe(0)
+    expect((await runCompiledCli(['update', '--yes'], { cwd: root })).code).toBe(0)
+    expect((await runCompiledCli(['uninstall', '--yes'], { cwd: root })).code).toBe(0)
+    expect(readTree(root)).toEqual(before)
+    // Nothing the fixture shipped, including its secret sentinel, was touched.
+    expect(readFileSync(path.join(root, '.mcp.json'), 'utf8')).toContain(SECRET_SENTINEL)
+    expect(readFileSync(path.join(root, 'CLAUDE.md'), 'utf8')).toContain(CLAUDE_MD_SENTINEL)
   })
 
   it('detects deliberate drift after installation', async () => {

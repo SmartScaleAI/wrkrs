@@ -1,6 +1,6 @@
 import { parseManifestDocument } from '../../config/load.js'
 import { createDiagnostic, type Diagnostic } from '../../core/diagnostics.js'
-import { MANIFEST_PATH } from '../../core/ownership.js'
+import { MANIFEST_PATH, MANIFEST_SCHEMA_VERSION } from '../../core/ownership.js'
 import { containmentDiagnostic, type CheckContext } from '../context.js'
 
 export async function checkManifest(context: CheckContext): Promise<Diagnostic[]> {
@@ -71,8 +71,43 @@ export async function checkManifest(context: CheckContext): Promise<Diagnostic[]
     }
     return diagnostics
   }
-  const manifest = parsed.value
+  const manifest = parsed.value.manifest
   context.manifest = manifest
+  context.manifestSchemaVersion = parsed.value.sourceSchemaVersion
+
+  if (parsed.value.migrated) {
+    diagnostics.push(
+      createDiagnostic(
+        'MANIFEST_MIGRATION_AVAILABLE',
+        'warning',
+        `Ownership manifest is schema version ${parsed.value.sourceSchemaVersion}; this wrkrs version writes version ${MANIFEST_SCHEMA_VERSION}`,
+        {
+          path: MANIFEST_PATH,
+          remediation:
+            'Run `wrkrs update` to rewrite the manifest in the current format; check never migrates it',
+          details: {
+            found: parsed.value.sourceSchemaVersion,
+            current: MANIFEST_SCHEMA_VERSION,
+          },
+        },
+      ),
+    )
+  }
+  if (manifest.state === 'partial-uninstall') {
+    diagnostics.push(
+      createDiagnostic(
+        'MANIFEST_PARTIAL_UNINSTALL',
+        'warning',
+        `A previous uninstall preserved ${manifest.entries.length} entr${manifest.entries.length === 1 ? 'y' : 'ies'}; this installation is partially removed`,
+        {
+          path: MANIFEST_PATH,
+          remediation:
+            'Review the remaining files, then run `wrkrs uninstall` again to remove what is now removable, or `wrkrs init` to reinstall',
+          details: { state: manifest.state, entries: manifest.entries.length },
+        },
+      ),
+    )
+  }
 
   for (const adapter of manifest.runtimeAdapters) {
     if (!context.adapters.get(adapter.id)) {
@@ -90,25 +125,12 @@ export async function checkManifest(context: CheckContext): Promise<Diagnostic[]
       )
     }
   }
-  if (context.config && context.config.preset.id !== manifest.preset.id) {
-    diagnostics.push(
-      createDiagnostic(
-        'MANIFEST_PRESET_MISMATCH',
-        'warning',
-        `Manifest preset "${manifest.preset.id}" differs from config preset "${context.config.preset.id}"`,
-        {
-          path: MANIFEST_PATH,
-          remediation: 'Align the preset in config.yaml and manifest.json',
-        },
-      ),
-    )
-  }
   if (!diagnostics.some((diagnostic) => diagnostic.severity === 'error')) {
     diagnostics.push(
       createDiagnostic(
         'MANIFEST_OK',
         'info',
-        `Ownership manifest is valid (wrkrs ${manifest.wrkrsVersion}, ${manifest.entries.length} entries, installation ${manifest.installationId})`,
+        `Ownership manifest is valid (wrkrs ${manifest.wrkrsVersion}, state ${manifest.state}, ${manifest.entries.length} entries, installation ${manifest.installationId})`,
         {
           path: MANIFEST_PATH,
         },

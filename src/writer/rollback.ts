@@ -149,6 +149,107 @@ export async function rollbackTransaction(input: {
     }
   }
 
+  /**
+   * Restores a replaced or removed file from its sibling backup, which holds
+   * the original inode. The restore happens only when wrkrs can still prove
+   * both sides: the backup must hash to the content it recorded, and the
+   * target must be exactly what wrkrs left there (or absent, for a removal).
+   * Anything else is an external change and is preserved untouched.
+   */
+  const restoreFromBackup = async (input: {
+    targetPath: string
+    backupPath: string
+    backupHash: string | null
+    /** Hash wrkrs wrote at the target, or null when the target should be absent. */
+    wroteHash: string | null
+    what: string
+  }): Promise<'restored' | 'retained'> => {
+    const directory = parentDirectory(input.targetPath) ?? ''
+    const targetName = baseName(input.targetPath)
+    const backupName = baseName(input.backupPath)
+    try {
+      return await fs.withinDirectory(root, directory, async (bound) => {
+        const backupStat = await bound.lstat(backupName)
+        const targetStat = await bound.lstat(targetName)
+
+        if (!backupStat || backupStat.kind !== 'file') {
+          // Without the backup nothing can be proven. The target is left as it
+          // is; it is only clean when it already holds the original content.
+          if (targetStat && targetStat.kind === 'file' && input.backupHash) {
+            const current = sha256(await bound.readFile(targetName))
+            if (current === input.backupHash) return 'restored'
+          }
+          retain(
+            input.targetPath,
+            `${input.what} could not be restored: the backup wrkrs made is gone`,
+          )
+          return 'retained'
+        }
+
+        const backupContent = sha256(await bound.readFile(backupName))
+        if (input.backupHash === null || backupContent !== input.backupHash) {
+          retain(
+            input.backupPath,
+            'backup entry differs from what wrkrs linked; it is preserved and the target is untouched',
+          )
+          return 'retained'
+        }
+
+        if (targetStat) {
+          if (targetStat.kind !== 'file') {
+            retain(input.targetPath, `${input.what} is now a ${targetStat.kind}; not restored`)
+            retain(input.backupPath, 'backup of the original content, kept for recovery')
+            return 'retained'
+          }
+          const current = sha256(await bound.readFile(targetName))
+          if (current === input.backupHash) {
+            // Already the original content: only the backup link is redundant.
+            await bound.unlink(backupName)
+            journal = withDurability(journal, await bound.sync())
+            return 'restored'
+          }
+          if (input.wroteHash === null || current !== input.wroteHash) {
+            retain(
+              input.targetPath,
+              `${input.what} differs from what wrkrs wrote; the external change is preserved`,
+            )
+            retain(input.backupPath, 'backup of the original content, kept for recovery')
+            return 'retained'
+          }
+        } else if (input.wroteHash !== null) {
+          // wrkrs wrote content here and it has since disappeared.
+          retain(
+            input.targetPath,
+            `${input.what} disappeared after wrkrs wrote it; the backup is kept for recovery`,
+          )
+          retain(input.backupPath, 'backup of the original content, kept for recovery')
+          return 'retained'
+        }
+
+        await bound.rename(backupName, targetName)
+        const restored = sha256(await bound.readFile(targetName))
+        if (restored !== input.backupHash) {
+          retain(input.targetPath, `${input.what} was restored but does not match the original`)
+          return 'retained'
+        }
+        try {
+          journal = withDurability(journal, await bound.sync())
+        } catch {
+          retain(input.targetPath, `${input.what} was restored, but the directory sync failed`)
+          return 'retained'
+        }
+        return 'restored'
+      })
+    } catch (error) {
+      if (ancestorMissing(error)) {
+        retain(input.targetPath, `${input.what} could not be reached; nothing was restored`)
+        return 'retained'
+      }
+      retain(input.targetPath, describe(error))
+      return 'retained'
+    }
+  }
+
   const operations = [...journal.operations].reverse()
   for (const operation of operations) {
     if (operation.status === 'planned') continue
@@ -197,6 +298,65 @@ export async function rollbackTransaction(input: {
       continue
     }
 
+    if (operation.kind === 'remove-directory') {
+      // Directory removals run only after the transaction commits, so a
+      // rollback never has one to reverse.
+      await save(
+        withOperation(journal, operation.path, {
+          status: 'reverted',
+          note: 'directory removal never ran',
+        }),
+      )
+      continue
+    }
+
+    if (operation.kind === 'replace-file' || operation.kind === 'remove-file') {
+      let clean = true
+      // A staging entry only exists for a replacement whose rename never ran.
+      if (operation.stagingPath) {
+        const result =
+          operation.status === 'staging'
+            ? await retainIncompleteStaging(operation.stagingPath)
+            : await removeIfOurs(operation.stagingPath, operation.expectedHash, 'staging file')
+        if (result === 'retained') clean = false
+      }
+      if (operation.backupPath) {
+        const wrote =
+          operation.kind === 'replace-file' &&
+          (operation.status === 'published' || operation.status === 'applied')
+            ? (operation.appliedHash ?? operation.expectedHash)
+            : null
+        const removed = operation.kind === 'remove-file' && operation.status === 'removed'
+        if (wrote !== null || removed) {
+          const result = await restoreFromBackup({
+            targetPath: operation.path,
+            backupPath: operation.backupPath,
+            backupHash: operation.backupHash,
+            wroteHash: wrote,
+            what: operation.kind === 'remove-file' ? 'removed file' : 'replaced file',
+          })
+          if (result === 'retained') clean = false
+        } else {
+          // The target was never changed; only the redundant backup link goes.
+          const result = await removeIfOurs(
+            operation.backupPath,
+            operation.backupHash,
+            'backup file',
+          )
+          if (result === 'retained') clean = false
+        }
+      }
+      const reason =
+        retained.get(operation.path) ?? retained.get(operation.backupPath ?? '') ?? 'retained'
+      await save(
+        withOperation(journal, operation.path, {
+          status: clean ? 'reverted' : 'retained',
+          note: clean ? 'original content restored' : reason,
+        }),
+      )
+      continue
+    }
+
     let clean = true
     if (operation.stagingPath) {
       const result =
@@ -225,18 +385,24 @@ export async function rollbackTransaction(input: {
   // Verification pass: every path this transaction may have created must be
   // proven absent, whatever the loop above believed. A path that cannot be
   // inspected inside its bound parent is retained (fail closed).
+  const restoring = (operation: TransactionJournal['operations'][number]): boolean =>
+    operation.kind === 'replace-file' || operation.kind === 'remove-file'
+
   for (const operation of input.journal.operations) {
     if (operation.status === 'planned') continue
-    const paths: string[] = []
-    if (operation.stagingPath) paths.push(operation.stagingPath)
+    // Names that must be gone: staging entries, backups, and any target this
+    // transaction created.
+    const absent: string[] = []
+    if (operation.stagingPath) absent.push(operation.stagingPath)
+    if (operation.backupPath) absent.push(operation.backupPath)
     if (
       operation.kind === 'create-directory' ||
-      operation.status === 'published' ||
-      operation.status === 'applied'
+      ((operation.kind === 'create-file' || operation.kind === 'remove-directory') &&
+        (operation.status === 'published' || operation.status === 'applied'))
     ) {
-      paths.push(operation.path)
+      absent.push(operation.path)
     }
-    for (const path of paths) {
+    for (const path of absent) {
       if (retained.has(path)) continue
       const directory = parentDirectory(path) ?? ''
       const name = baseName(path)
@@ -246,6 +412,31 @@ export async function rollbackTransaction(input: {
       } catch (error) {
         if (ancestorMissing(error)) continue
         retain(path, `could not verify removal (${describe(error)})`)
+      }
+    }
+
+    // A replaced or removed file must be back, byte for byte.
+    if (restoring(operation) && operation.backupHash) {
+      if (retained.has(operation.path)) continue
+      const directory = parentDirectory(operation.path) ?? ''
+      const name = baseName(operation.path)
+      try {
+        await fs.withinDirectory(root, directory, async (bound) => {
+          const stat = await bound.lstat(name)
+          if (!stat || stat.kind !== 'file') {
+            retain(operation.path, 'original file was not restored')
+            return
+          }
+          if (sha256(await bound.readFile(name)) !== operation.backupHash) {
+            retain(operation.path, 'restored content does not match the original')
+          }
+        })
+      } catch (error) {
+        if (ancestorMissing(error)) {
+          retain(operation.path, 'original file was not restored')
+          continue
+        }
+        retain(operation.path, `could not verify restoration (${describe(error)})`)
       }
     }
   }

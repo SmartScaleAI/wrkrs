@@ -2,7 +2,7 @@ import { z } from 'zod'
 
 import type { WrkrsConfig } from '../core/configuration.js'
 import type { OwnershipManifest, TransactionJournal } from '../core/ownership.js'
-import { MANAGEMENT_MODES } from '../core/ownership.js'
+import { INSTALLATION_STATES, MANAGEMENT_MODES } from '../core/ownership.js'
 
 export const IDENTIFIER_PATTERN = '^[a-z0-9]+(?:-[a-z0-9]+)*$'
 const HASH_PATTERN = '^sha256:[0-9a-f]{64}$'
@@ -70,8 +70,7 @@ export const manifestEntrySchema = z.strictObject({
   lastAppliedHash: contentHash,
 })
 
-export const manifestSchemaV1 = z.strictObject({
-  schemaVersion: z.literal(1),
+const manifestBody = {
   installationId: z.string().uuid(),
   wrkrsVersion: z.string().min(1),
   installedAt: timestamp,
@@ -80,13 +79,46 @@ export const manifestSchemaV1 = z.strictObject({
   runtimeAdapters: z.array(z.strictObject({ id: identifier, version: z.int().positive() })).min(1),
   entries: z.array(manifestEntrySchema),
   createdDirectories: z.array(relativePath),
+}
+
+/** Version 1: the first durable format. Read for migration; never written again. */
+export const manifestSchemaV1 = z.strictObject({
+  schemaVersion: z.literal(1),
+  ...manifestBody,
+})
+
+/** Version 2 adds the explicit installation state that partial uninstall records. */
+export const manifestSchemaV2 = z.strictObject({
+  schemaVersion: z.literal(2),
+  state: z.enum(INSTALLATION_STATES),
+  ...manifestBody,
 })
 
 export const journalOperationSchema = z.strictObject({
   path: relativePath,
-  kind: z.enum(['create-file', 'create-directory']),
-  status: z.enum(['planned', 'staging', 'staged', 'published', 'applied', 'reverted', 'retained']),
+  kind: z.enum([
+    'create-file',
+    'create-directory',
+    'replace-file',
+    'remove-file',
+    'remove-directory',
+  ]),
+  status: z.enum([
+    'planned',
+    'staging',
+    'staged',
+    'backed-up',
+    'published',
+    'applied',
+    'removed',
+    'reverted',
+    'retained',
+  ]),
   stagingPath: relativePath.nullable(),
+  // Defaulted so a journal written by a version that only created files still
+  // parses: those operations never had a backup.
+  backupPath: relativePath.nullable().default(null),
+  backupHash: contentHash.nullable().default(null),
   expectedHash: contentHash.nullable(),
   appliedHash: contentHash.nullable(),
   note: z.string().nullable(),
@@ -95,7 +127,7 @@ export const journalOperationSchema = z.strictObject({
 export const journalSchemaV1 = z.strictObject({
   schemaVersion: z.literal(1),
   transactionId: z.string().uuid(),
-  command: z.literal('init'),
+  command: z.enum(['init', 'update', 'uninstall']),
   planDigest: contentHash,
   startedAt: timestamp,
   updatedAt: timestamp,
@@ -118,7 +150,7 @@ type Extends<A, B> = A extends B ? true : false
 type Assert<T extends true> = T
 export type ConfigSchemaMatchesCore = Assert<Extends<z.output<typeof configSchemaV1>, WrkrsConfig>>
 export type ManifestSchemaMatchesCore = Assert<
-  Extends<z.output<typeof manifestSchemaV1>, OwnershipManifest>
+  Extends<z.output<typeof manifestSchemaV2>, OwnershipManifest>
 >
 export type JournalSchemaMatchesCore = Assert<
   Extends<z.output<typeof journalSchemaV1>, TransactionJournal>

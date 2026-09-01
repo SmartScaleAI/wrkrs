@@ -74,7 +74,10 @@ export interface WrkrsConfigSnapshot {
 export interface WrkrsManifestSnapshot {
   readonly path: string
   readonly valid: boolean
+  /** Migrated in memory to the current format; the file on disk is unchanged. */
   readonly manifest: OwnershipManifest | null
+  /** Schema version of the document on disk, before any in-memory migration. */
+  readonly sourceSchemaVersion: number | null
   readonly error: string | null
 }
 

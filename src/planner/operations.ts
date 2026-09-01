@@ -2,7 +2,7 @@ import type { Conflict, ExpectedState, PlanOperation, PlanOutcome } from '../cor
 import type { ManagementMode } from '../core/ownership.js'
 import type { FileSnapshot } from '../core/snapshot.js'
 import { sha256 } from '../platform/hash.js'
-import { renderCreateDiff } from './diff.js'
+import { renderCreateDiff, renderRemoveDiff, renderReplaceDiff } from './diff.js'
 
 export const GENERATED_FILE_MODE = 0o644
 export const GENERATED_DIRECTORY_MODE = 0o755
@@ -40,6 +40,64 @@ export function createOperation(source: OperationSource, content: string): PlanO
     proposedBytes: bytes,
     mode: GENERATED_FILE_MODE,
     diff: renderCreateDiff(source.path, content),
+    blocker: null,
+  }
+}
+
+/**
+ * Replaces a file wrkrs already owns. `existing` is the exact snapshot taken
+ * during planning; its hash becomes the precondition the writer rechecks, so
+ * a file that changed after planning is never overwritten.
+ */
+export function replaceOperation(
+  source: OperationSource,
+  existing: FileSnapshot,
+  currentContent: string,
+  proposedContent: string,
+): PlanOperation {
+  const bytes = new TextEncoder().encode(proposedContent)
+  return {
+    path: source.path,
+    outcome: 'replace',
+    component: source.component,
+    reason: source.reason,
+    management: source.management,
+    sourceId: source.sourceId,
+    sourceVersion: source.sourceVersion,
+    expected: expectedStateOf(existing),
+    proposedHash: sha256(bytes),
+    proposedSize: bytes.byteLength,
+    proposedBytes: bytes,
+    mode: GENERATED_FILE_MODE,
+    diff: renderReplaceDiff(source.path, currentContent, proposedContent),
+    blocker: null,
+  }
+}
+
+/**
+ * Removes a file wrkrs owns whose current bytes still match what wrkrs last
+ * applied. The expected hash is the precondition; content is rendered as a
+ * complete deletion diff so the reviewer sees exactly what disappears.
+ */
+export function removeOperation(
+  source: OperationSource,
+  existing: FileSnapshot,
+  currentContent: string,
+): PlanOperation {
+  return {
+    path: source.path,
+    outcome: 'remove',
+    component: source.component,
+    reason: source.reason,
+    management: source.management,
+    sourceId: source.sourceId,
+    sourceVersion: source.sourceVersion,
+    expected: expectedStateOf(existing),
+    proposedHash: null,
+    proposedSize: null,
+    proposedBytes: null,
+    mode: null,
+    diff: renderRemoveDiff(source.path, currentContent),
     blocker: null,
   }
 }

@@ -44,6 +44,7 @@ export function serializeConfig(config: WrkrsConfig): string {
 export function serializeManifest(manifest: OwnershipManifest): string {
   const ordered = {
     schemaVersion: manifest.schemaVersion,
+    state: manifest.state,
     installationId: manifest.installationId,
     wrkrsVersion: manifest.wrkrsVersion,
     installedAt: manifest.installedAt,
@@ -81,6 +82,8 @@ export function serializeJournal(journal: TransactionJournal): string {
       kind: operation.kind,
       status: operation.status,
       stagingPath: operation.stagingPath,
+      backupPath: operation.backupPath,
+      backupHash: operation.backupHash,
       expectedHash: operation.expectedHash,
       appliedHash: operation.appliedHash,
       note: operation.note,

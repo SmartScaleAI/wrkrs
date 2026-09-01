@@ -1,6 +1,6 @@
 # wrkrs decision log
 
-Last updated: 2026-08-29
+Last updated: 2026-08-31
 
 Statuses:
 
@@ -501,6 +501,32 @@ Rationale:
 - A retained path is only actionable if it names the file the user must look at; `.wrkrs` as a stand-in both hid which removal was unproven and implied the whole directory was at fault.
 - Durability is a property of the directory entry, not of the moment it was first attempted: a later fsync of the same directory flushes the earlier deletion, so refusing to reconcile reported a failure that provably no longer existed.
 - Keeping the pending set and the persisted journal on one clock — conservative when unproven, cleared when proven — is what makes the two records consistent without either over-claiming or inventing a second cleanup path.
+
+### A-021: Lifecycle safety through owned replacement and removal
+
+Status: Approved by the owner on 2026-08-31; implemented  
+Date: 2026-08-31
+
+The second increment implements the update and uninstall semantics that A-011 fixed before init wrote its first manifest. The behavior contract in architecture.md is unchanged; this record captures the five choices that implementing it forces.
+
+Decision:
+
+- Update derives desired state from the packaged wrkrs version and the repository's own `.wrkrs/config.yaml`, never from a rescanned roster. Detection still runs read-only during update, but only to supply the machine-readable evidence for specializations config already declares. A declared specialization with no current evidence is rendered without evidence and reported, never dropped.
+- Update preserves a drifted managed file per file and continues with the rest of the plan, rather than blocking the whole run. The drift is reported at the moment it is detected and again by `wrkrs check`.
+- The manifest advances to schema version 2 with a required `state` field of `installed` or `partial-uninstall`, migrated from version 1 by setting `installed`. `wrkrs check` reads version 1 and reports it as migratable without migrating it.
+- The journal widens its `command` and `kind` enumerations in place without a version bump, because every version 1 journal remains valid under the wider enumerations.
+- The transactional writer gains `replace-file`, `remove-file`, and `remove-directory` beside exclusive create. Each backs up prior bytes and mode inside `.wrkrs` before mutating and restores them on rollback. Replacement and removal may only target a path the manifest already owns whose current hash matched at precondition recheck.
+
+Rationale:
+
+- Config is the seeded, user-editable input the product promises; an update that cannot apply an edit to it leaves the roster unchangeable without a reinstall. Letting detection change the roster during update would silently rewrite a decision the owner made at init.
+- Blocking a whole update on one customized file punishes exactly the repositories that adopted the framework most, and it conceals that every other file is reconcilable. The accepted cost is that an update can leave a stale projection beside a changed role file; that state is reported twice and is never silent.
+- Partial-uninstall state must be recorded, not inferred: without it, `check` would call a half-removed installation healthy and a later update would reinstall what the user asked to remove. An optional field inside version 1 would require reading absence as `installed`, which is the guessing the version discipline exists to prevent. Building the first real migration now, while nothing is published, is cheaper than after.
+- Keeping exclusive create no-replace preserves the invariant five review rounds hardened. Replacement is safe for a different reason than creation is: not because the path is unoccupied, but because the manifest proves wrkrs wrote the exact bytes that are still there.
+
+Deliberately not decided here: `--force` uninstall and field-specific merges for drifted managed files. Both need a recoverable-backup or merge mechanism that no current behavior requires, and D-003 already holds the merge question.
+
+Implementation added one decision the design did not anticipate: an update adopts an edit to a seeded file that round-trips through the generator, recording the current hash as last applied. Editing `.wrkrs/config.yaml` is the intended workflow for a seeded file; without adoption that edit would be reported as a customization forever and every later uninstall would end partial. An edit that does not round-trip is still preserved and reported, unchanged.
 
 ## Deferred decisions
 

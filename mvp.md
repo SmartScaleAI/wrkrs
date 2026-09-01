@@ -1,7 +1,7 @@
 # wrkrs MVP
 
-Status: Locked product scope; first vertical slice approved by the owner on 2026-08-29 and implemented  
-Last updated: 2026-08-29
+Status: Locked product scope; first vertical slice and second increment approved by the owner and implemented  
+Last updated: 2026-08-31
 
 ## Product statement
 
@@ -363,7 +363,7 @@ All four items were approved by the owner on 2026-08-29. The implementation repo
 
 ## First vertical slice implementation status
 
-Implemented on 2026-08-29, committed as a8e4a5ba567dc06a96868bf941b242a00e30df49 on the review branch review/mvp-vertical-slice, and pushed for independent review. The first review remediation (decisions.md A-016) was committed as baab7195004463c06ff3bc0aa1b8b765eb34df0b on that branch; the second review round (decisions.md A-017) follows it on the same branch.
+Implemented on 2026-08-29, committed as a8e4a5ba567dc06a96868bf941b242a00e30df49 on the review branch review/mvp-vertical-slice, and pushed for independent review. Five review rounds followed on that branch: A-016 as baab7195004463c06ff3bc0aa1b8b765eb34df0b, A-017 as 14c8c4c0890196741a86e7ad045c04bb5ef0e81a, A-018 as 61df451e41d6884082983af1376c5a030a300f7b, A-019 as 0b8b9140328e7678ee85ce5b4c9d50de0e17c10a, and A-020 as 6d186d0d0371af9aeab19915ee0150d414e422d3. Remote main still points at the initial slice commit; no round has been merged.
 
 Acceptance test coverage:
 
@@ -428,3 +428,232 @@ Fifth review round regression tests (decisions.md A-020):
 | A persistent sync failure keeps the exact `.wrkrs/.lock` entry, a best-effort journal, and honest `wrkrs check` diagnostics | test/unit/writer/bookkeeping.test.ts |
 
 Deliberately deferred, unchanged from the approved scope: update, uninstall, shared-file structural edits, providers, and cross-platform CI. Verified on macOS with Node 22.23.2 and 24.18.1. Linux is unverified; Windows fails closed by design in this MVP and is not supported until the cross-platform increment.
+
+## Second increment: lifecycle safety
+
+Status: Approved by the owner on 2026-08-31 and implemented  
+Date proposed: 2026-08-31
+
+### Goal
+
+Prove that wrkrs can change and remove its own installation as safely as it created it. Every replacement and every removal runs through the same analyzer, planner, diff renderer, and journaled transaction that init uses, and no customized or unrecognized byte is ever destroyed.
+
+### User-visible commands
+
+    npx wrkrs update
+    npx wrkrs update --dry-run
+    npx wrkrs update --yes
+    npx wrkrs update --json --dry-run
+    npx wrkrs uninstall
+    npx wrkrs uninstall --dry-run
+    npx wrkrs uninstall --yes
+    npx wrkrs uninstall --json --dry-run
+
+Both commands accept `--cwd` and resolve the Git worktree root exactly as init and check do. Exit codes are unchanged: 0 success with warnings allowed, 1 error or blocked plan, 2 invalid usage.
+
+### Desired state for update
+
+Update recomputes desired state from two owned inputs only:
+
+1. the packaged wrkrs version, which supplies role templates, adapter projections, the JSON Schema, and the configuration serializer
+2. the repository's own `.wrkrs/config.yaml`, which supplies the roster, role sources, specializations, governance, and extensions
+
+Repository detection runs read-only during update, but only as an evidence source. It supplies the machine-readable evidence rendered into the Software Engineer role for specializations that config already declares. Detection never adds a role, removes a role, adds a specialization, or removes one. A specialization declared in config with no current evidence is rendered without evidence and reported as an informational finding; it is never dropped.
+
+Changing the recommended roster from a rescanned repository remains an init-time decision and is deliberately out of scope for this increment.
+
+### update behavior
+
+update must:
+
+1. Reject a directory that is not inside a non-bare Git worktree.
+2. Require a valid existing installation: config and manifest present, parsed, and at supported schema versions. Otherwise block and direct the user to `wrkrs init`.
+3. Refuse to run while another wrkrs transaction holds the lock or an interrupted journal is present.
+4. Perform no target writes before confirmation.
+5. Recompute the current hash of every owned entry and classify drift before planning.
+6. Replace a managed file whose current hash equals its last applied hash and whose desired content differs.
+7. Report a no-op for a managed file already byte-identical to its desired content.
+8. Preserve a drifted managed file, naming the exact path and reason, and never overwrite it.
+9. Preserve a customized seeded file, report it, and never overwrite it.
+10. Replace an undrifted seeded file only when the packaged template changed.
+11. Create a file that the desired state adds and the manifest does not own.
+12. Remove a managed file that the manifest owns, the desired state no longer contains, and whose hash is unchanged; preserve and report it when drifted.
+13. Never modify or delete a referenced entry.
+14. Never touch a path that is neither in the manifest nor in the desired state.
+15. Display an exact diff for every create, every replace, and every removal.
+16. Require confirmation, or `--yes` in non-interactive mode.
+17. Recheck plan preconditions, including every expected hash, immediately before apply.
+18. Apply through a transaction that restores exact prior bytes and modes on rollback.
+19. Write the updated manifest only after post-apply validation passes.
+20. Leave Git history and the working tree commit state under the developer's control.
+
+Drift is preserved per file rather than aborting the run. A drifted managed file is reported as preserved, the remaining operations still apply, and `wrkrs check` continues to report the drift afterwards. The rejected alternative was blocking the whole run until the user reverts the edit; it makes update unusable in exactly the repositories that customized the most, and it hides the fact that every other file is already reconcilable. The consequence is accepted explicitly: an update can leave a stale projection beside a changed role file, and that state is detectable, reported at the moment it happens, and reported again by check.
+
+### uninstall behavior
+
+uninstall must:
+
+1. Reject a directory that is not inside a non-bare Git worktree.
+2. Build the plan solely from a validated manifest and current bytes. Packaged templates are never consulted.
+3. Refuse to run while another wrkrs transaction holds the lock or an interrupted journal is present.
+4. Perform no target deletions before confirmation.
+5. Remove a managed entry whose current hash still equals its last applied hash.
+6. Preserve and report a drifted managed entry.
+7. Remove a seeded entry whose current hash is unchanged.
+8. Preserve and report a customized seeded entry.
+9. Never delete a referenced entry.
+10. Remove only directories the manifest records as created, only when empty at removal time, deepest first.
+11. Remove the manifest and the `.wrkrs` directory when nothing owned remains.
+12. Retain a reduced manifest in partial-uninstall state, listing only the preserved entries, when anything remains.
+13. Display the exact path and reason for every removal and every preservation.
+14. Require confirmation, or `--yes` in non-interactive mode.
+15. Recheck preconditions immediately before apply.
+16. Restore every removed byte and mode on rollback.
+17. Leave every unrelated file untouched, including CLAUDE.md, settings, hooks, commands, pre-existing agents and skills, and .mcp.json.
+
+A `--force` option is deliberately out of scope. Nothing in this increment deletes customized content, so the recoverable-backup mechanism that architecture.md requires of any force option is not built yet.
+
+### Format changes
+
+Manifest schema version 2 adds one required field:
+
+    "state": "installed" | "partial-uninstall"
+
+A version 1 manifest is migrated to version 2 by setting `state` to `installed`. The migration is explicit and one-way, as A-008 requires; `wrkrs check` reads a version 1 manifest and reports it as migratable without migrating it. The alternative, an optional field inside version 1, was rejected because absence would have to be inferred as `installed`, which is exactly the guessing the schema-version discipline exists to prevent, and because the first real migration is cheaper to build and test now than after publication.
+
+The journal schema extends two enumerations in place, without a version bump, because every version 1 journal remains valid under the wider enumerations:
+
+- `command` becomes `init | update | uninstall`
+- `kind` becomes `create-file | create-directory | replace-file | remove-file | remove-directory`
+
+### Writer extensions
+
+The transactional writer gains three operations beside the existing exclusive create:
+
+- `replace-file`: stage the new content, back up the prior bytes and mode inside `.wrkrs`, publish by rename, and restore the backup on rollback.
+- `remove-file`: back up the bytes and mode, unlink, and restore the backup on rollback.
+- `remove-directory`: remove only a directory the manifest records as created, only when empty, deepest first, and recreate it on rollback.
+
+The no-replace invariant that A-017 and A-018 established for init is preserved exactly. Exclusive creation still refuses to replace an existing target. Replacement and removal are distinct, explicitly planned operations that may only target a path the manifest already owns and whose current hash matched at precondition recheck, so an unknown or unowned entry is still never overwritten or deleted by any code path.
+
+### Second increment acceptance tests
+
+#### Preconditions and refusal
+
+42. update outside a Git worktree exits with an error and writes nothing.
+43. update without an installation blocks, names `wrkrs init`, and writes nothing.
+44. update or uninstall against an unsupported config or manifest schema version blocks and writes nothing.
+45. update and uninstall refuse to run while a lock or an interrupted journal is present.
+46. A non-interactive update or uninstall without `--yes` refuses to apply.
+47. update --dry-run and uninstall --dry-run create, change, and remove no bytes; a complete before/after tree hash is identical.
+
+#### Update planning
+
+48. An installation that is already current plans no operation and reports a no-op.
+49. Adding a specialization to config.yaml replans exactly the Software Engineer role file and its Claude projection, and nothing else.
+50. Removing a role from config.yaml plans removal of exactly that role file and its projection, and nothing else.
+51. A drifted managed projection is preserved and reported by exact path, and every other operation still applies.
+52. An undrifted managed projection is replaced with exactly the desired bytes and its new hash is recorded.
+53. A customized seeded role file is preserved and reported, and its bytes are unchanged.
+54. update writes no path that is neither in the manifest nor in the desired state.
+55. The update plan JSON contains no ANSI escape sequences, and its digest is stable across repositories and absolute paths.
+56. A specialization declared in config with no current evidence is rendered without evidence and reported, not dropped.
+
+#### Uninstall
+
+57. uninstall in a clean installation removes exactly the owned files and created directories, leaving the repository byte-identical to its pre-init state.
+58. uninstall in the existing-Claude fixture leaves every pre-existing file byte- and mode-identical.
+59. A drifted managed file is preserved by uninstall and reported.
+60. A customized seeded file is preserved by uninstall and reported.
+61. When anything is preserved, a reduced manifest in partial-uninstall state remains, listing only the retained entries.
+62. Re-running uninstall after a partial uninstall is safe and removes anything that has since become removable.
+63. A directory wrkrs created that is not empty is left in place and reported.
+64. A directory wrkrs did not create is never removed.
+
+#### Transaction, rollback, and check
+
+65. An injected failure during update rolls back and restores every replaced and removed file to its exact prior bytes and mode.
+66. An injected failure during uninstall restores every removed file to its exact prior bytes and mode.
+67. A precondition change between planning and apply aborts before the first mutation, for both commands.
+68. A file externally changed after wrkrs replaced or removed it is not clobbered by rollback, and the recovery report names the exact path.
+69. check reports a partial-uninstall manifest with a stable diagnostic instead of a healthy installation.
+70. check reads a version 1 manifest and reports it as migratable without migrating it.
+71. check passes after a successful update.
+
+#### Packaging
+
+72. The tarball smoke test also exercises update --dry-run, update --yes, uninstall --dry-run, and uninstall --yes.
+73. Unit and integration tests pass on the supported Node floor and the preferred LTS version.
+
+### Second increment test fixtures
+
+The two committed repository fixtures are reused unchanged. Lifecycle fixtures are built by the tests from a real validated install rather than committed, so no fixture can drift from what init actually produces:
+
+- installed-repository: the clean fixture after a validated `init --yes`
+- customized-installation: an installation with one drifted managed projection and one customized seeded role
+- partial-uninstall-installation: the residue left by an uninstall that preserved at least one entry
+- a committed version 1 manifest fixture for the migration and check tests
+
+### Second increment implementation plan
+
+1. Extend the plan model with replace and remove outcomes, removal diffs, and their conflict families.
+2. Extend the journal enumerations and add manifest schema version 2 with its explicit version 1 migration.
+3. Extend the transactional writer with backup staging, replace, remove, directory removal, and restore-on-rollback.
+4. Build the update desired-state compiler from config, preset, and detection evidence.
+5. Implement the update command, its human and JSON reporters, and its confirmation surface.
+6. Implement the uninstall command, its reporters, and the reduced-manifest write.
+7. Add check diagnostics for partial-uninstall state and a migratable manifest.
+8. Add the lifecycle fixtures, acceptance tests 42 through 73, and the extended tarball smoke assertions.
+
+### Second increment dependencies
+
+No new production dependency. jsonc-parser remains unnecessary because this increment performs no shared strict-JSON structural edit: everything update and uninstall touch is a wrkrs-owned whole file.
+
+### Second increment exit criteria
+
+The increment is complete only when:
+
+- acceptance tests 42 through 73 pass
+- the packed tarball smoke test covers update and uninstall
+- rollback is proven by injected failure for both replacement and removal
+- existing Claude files remain byte-identical after update and after uninstall
+- no test destroys a customized byte
+- architecture.md, mvp.md, and decisions.md reflect any implementation change
+- no commit, push, npm publication, or release occurs without explicit approval
+
+### Second increment approval gate
+
+Implementation must not begin until the owner approves:
+
+1. the update desired-state sources, in particular detection as an evidence-only input
+2. the per-file drift policy for update, rather than blocking the whole run
+3. manifest schema version 2 with an explicit version 1 migration
+4. the deferral of `--force` and of field-specific merges
+5. acceptance tests 42 through 73
+
+## Second increment implementation status
+
+Implemented on 2026-08-31 on the review branch review/mvp-vertical-slice, following the approved scope above. All 32 acceptance tests pass alongside the 41 from the first slice.
+
+Acceptance test coverage:
+
+| Tests | Status | Where |
+| --- | --- | --- |
+| 42-47 | Verified | test/unit/lifecycle/update.test.ts, test/unit/lifecycle/uninstall.test.ts, test/integration/cli.test.ts |
+| 48-56 | Verified | test/unit/lifecycle/update.test.ts, test/integration/cli.test.ts |
+| 57-64 | Verified | test/unit/lifecycle/uninstall.test.ts, test/unit/planner/lifecycle-plan.test.ts |
+| 65-68 | Verified | test/unit/lifecycle/rollback.test.ts |
+| 69-71 | Verified | test/unit/check/lifecycle-check.test.ts |
+| 72 | Verified | scripts/smoke.mjs via npm run smoke |
+| 73 | Verified locally on macOS with Node 22.23.2 and Node 24.18.1; Ubuntu and Windows runs remain part of Increment 4 cross-platform CI | npm test and npm run smoke on both runtimes |
+
+Implementation notes recorded during the increment:
+
+- The writer's `replace-file`, `remove-file`, and `remove-directory` operations were added beside exclusive create, which keeps its no-replace contract unchanged. A replacement or removal first hard-links the existing entry to a sibling backup name, so the original inode survives until the transaction validates; rollback restores it with a single atomic rename inside the bound parent directory.
+- Backups are released after the commit point, not per operation. An earlier operation must stay reversible while a later one runs, so every backup lives until the whole transaction has validated. A backup that cannot be released afterwards is reported by exact path as `TRANSACTION_BACKUP_RETAINED` and never changes the committed result.
+- Directory removals run after the commit, once every backup and bookkeeping file inside them is gone. A directory that still holds entries is left in place and reported as `DIRECTORY_RETAINED`; leaving an empty directory behind is not a safety failure, and forcing it would be.
+- Uninstall does not read `.wrkrs/config.yaml`. It plans from the validated manifest and current bytes alone, which is also what makes acceptance test 62 work: a partial uninstall has already removed configuration, and the retry that finishes the job must still run.
+- `wrkrs check` reads the manifest before the configuration, because the installation state decides how a missing configuration is judged. After a partial uninstall the absence of config.yaml is reported as `CONFIG_REMOVED_BY_UNINSTALL`, not as an error.
+- An update adopts an edit to a seeded file that round-trips through the generator: when the file already holds exactly what wrkrs would write, that hash is recorded as last applied. Without this, editing `.wrkrs/config.yaml` — the intended workflow — would mark it customized forever and force every later uninstall to end partial.
+
+Deliberately deferred, unchanged from the approved scope: `--force` uninstall, field-specific merges for drifted managed files (decisions.md D-003), providers, and cross-platform CI. Verified on macOS with Node 22.23.2 and 24.18.1. Linux is unverified; Windows fails closed by design and is not supported until the cross-platform increment.
