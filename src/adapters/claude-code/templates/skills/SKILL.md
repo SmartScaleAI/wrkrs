@@ -4,6 +4,7 @@ description: Run the wrkrs Product Engineering team on a requested outcome. Expl
 argument-hint: <requested outcome>
 disable-model-invocation: true
 context: fork
+background: false
 agent: {{primaryAgent}}
 ---
 

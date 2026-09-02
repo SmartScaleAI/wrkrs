@@ -36,10 +36,10 @@ Exit codes: `0` success (warnings allowed), `1` error or blocked plan, `2` inval
 .wrkrs/manifest.json                managed  ownership record with content hashes
 .wrkrs/roles/*.md                   seeded   portable role definitions (canonical)
 .claude/agents/wrkrs-*.md           managed  Claude Code subagent projections
-.claude/skills/wrkrs/SKILL.md       managed  explicit `/wrkrs <outcome>` entry point
+.claude/skills/wrkrs/SKILL.md       managed  explicit `/wrkrs <outcome>` entry point (waits)
 ```
 
-`.wrkrs/config.yaml` is schema version 3. `execution.profile` is the floor the Product Manager may raise and must never lower (`adaptive`, `fast`, `standard`, or `full`). `connections` maps each Increment 3 read capability to at most one existing GitHub, Linear, Figma, generic MCP, or manual binding. wrkrs never installs an MCP server, writes `.mcp.json`, or stores a credential. Reserved mutation capabilities cannot be bound.
+`.wrkrs/config.yaml` is schema version 3. `execution.profile` is the floor the Product Manager may raise and must never lower (`adaptive`, `fast`, `standard`, or `full`). `connections` maps each Increment 3 read capability to at most one existing GitHub, Linear, Figma, generic MCP, or manual binding. Dedicated GitHub, Linear, and Figma MCP bindings require a server name that contains a matching token (`github`/`gh`, `linear`, `figma`); other servers use the generic MCP provider. wrkrs never installs an MCP server, writes `.mcp.json`, or stores a credential. Reserved mutation capabilities cannot be bound. `/wrkrs` waits for the Product Manager (`background: false`).
 
 wrkrs never edits `CLAUDE.md`, Claude settings, hooks, existing agents, skills, commands, or `.mcp.json`. Conflicting namespaced paths, symlinks, and an unrecognized `.wrkrs` directory block installation instead of being overwritten. Every command runs through a journaled transaction with an exclusive lock, precondition rechecks, post-write verification, and hash-guarded rollback.
 

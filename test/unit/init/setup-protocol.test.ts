@@ -54,7 +54,7 @@ describe('setup questions and answers', () => {
   it('102/128/136: question set offers registered providers, verified servers, manual, and skip; reserved mutations are absent', () => {
     const set = discoverQuestionSet({
       providers: createTestDependencies().providers,
-      projectServers: ['linear', 'fake-tracker'],
+      projectServers: ['linear', 'fake-tracker', 'github.com'],
       cliPresent: true,
     })
     expect(set.questions.map((question) => question.capability)).toEqual([...READ_CAPABILITY_IDS])
@@ -65,12 +65,46 @@ describe('setup questions and answers', () => {
     expect(ids).toContain('provider:linear:kind:mcp-server:scope:project:server:linear')
     expect(ids).toContain('provider:mcp:kind:mcp-server:scope:project:server:linear')
     expect(ids).toContain('provider:mcp:kind:mcp-server:scope:project:server:fake-tracker')
+    expect(ids).not.toContain('provider:linear:kind:mcp-server:scope:project:server:fake-tracker')
+    expect(ids).not.toContain('provider:linear:kind:mcp-server:scope:project:server:github.com')
     expect(new Set(ids).size).toBe(ids.length)
     expect(ids.join(' ')).not.toContain('pull-request-comment')
     const source = set.questions.find(
       (question) => question.capability === 'source-control-context',
     )!
     expect(source.choices.some((choice) => choice.id.includes('kind:cli:executable:gh'))).toBe(true)
+    expect(
+      source.choices.some(
+        (choice) =>
+          choice.provider === 'github' &&
+          choice.kind === 'mcp-server' &&
+          choice.server === 'github.com',
+      ),
+    ).toBe(true)
+    expect(
+      source.choices.some(
+        (choice) =>
+          choice.provider === 'github' &&
+          choice.kind === 'mcp-server' &&
+          choice.server === 'fake-tracker',
+      ),
+    ).toBe(false)
+    expect(
+      source.choices.some(
+        (choice) =>
+          choice.provider === 'github' &&
+          choice.kind === 'mcp-server' &&
+          choice.server === 'linear',
+      ),
+    ).toBe(false)
+    expect(
+      source.choices.some(
+        (choice) =>
+          choice.provider === 'mcp' &&
+          choice.kind === 'mcp-server' &&
+          choice.server === 'fake-tracker',
+      ),
+    ).toBe(true)
   })
 
   it('132: questionSetDigest is stable and changes when choices change', () => {
@@ -161,11 +195,14 @@ describe('setup questions and answers', () => {
     const work = discovered.questions.find(
       (question) => question.capability === 'work-item-context',
     )!
-    const linear =
+    expect(
       work.choices.find(
         (choice) => choice.provider === 'linear' && choice.id.includes('fake-tracker'),
-      ) ??
-      work.choices.find((choice) => choice.provider === 'mcp' && choice.id.includes('fake-tracker'))
+      ),
+    ).toBeUndefined()
+    const linear = work.choices.find(
+      (choice) => choice.provider === 'mcp' && choice.id.includes('fake-tracker'),
+    )
     expect(linear).toBeDefined()
     const outside = mkdtempSync(path.join(tmpdir(), 'wrkrs-answers-'))
     const answersPath = path.join(outside, 'answers.json')

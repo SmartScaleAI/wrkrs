@@ -160,7 +160,7 @@ The minimal adapter creates:
 - .claude/agents/wrkrs-qa-engineer.md
 - .claude/skills/wrkrs/SKILL.md
 
-The project skill is an explicit entry point. It runs in a fork using the wrkrs-product-manager agent, waits for the result, and passes the requested outcome as arguments. It does not pre-approve tools or alter permissions. The Product Manager definition instructs it to use stable Claude subagents, request plan and design approval at the locked gates, and parallelize only independent work.
+The project skill is an explicit entry point. It runs in a fork using the wrkrs-product-manager agent, sets `background: false` so Claude Code waits for the result, and passes the requested outcome as arguments. It does not pre-approve tools or alter permissions. The Product Manager definition instructs it to use stable Claude subagents, request plan and design approval at the locked gates, and parallelize only independent work. `wrkrs check` requires those frontmatter fields.
 
 The adapter does not modify CLAUDE.md, settings files, hooks, or .mcp.json in the first vertical slice. Existing components are listed as preserved. If a target namespaced path already exists:
 
@@ -546,6 +546,13 @@ for every other server, and `manual` for no tool at all. No registered provider
 declares a mutation capability, because nothing in this increment mutates a
 remote system.
 
+Dedicated providers bind an MCP server only when the server name, split on
+non-alphanumeric characters, contains a matching token: `github` or `gh` for
+GitHub, `linear` for Linear, `figma` for Figma. Setup does not offer a
+dedicated-provider choice for an unmatched name. A hand-edited mismatch is
+`CONNECTION_SERVER_PROVIDER_MISMATCH`. Generic `mcp` may still bind any
+permitted server name.
+
 How much wrkrs can prove about a binding is recorded explicitly, because the
 honest answer is often "the owner says so and repository files cannot confirm
 it". Verification is a fact about what was observed; severity is a policy
@@ -880,7 +887,7 @@ Human terminal prompts are unchanged. A machine caller uses three non-blocking i
 3. `wrkrs init --json --dry-run --answers <file>` recomputes and validates the question set, rejects a stale `questionSetDigest`, produces the semantic plan and plan digest, writes nothing, and exits.
 4. `wrkrs init --json --yes --answers <file> --expect-digest <plan-digest>` recomputes the questions and plan and applies only when both the answers document and the expected plan digest remain valid.
 
-Question IDs are capability-derived. Choice IDs are deterministic and unique across provider, binding kind, scope, and server or executable identity: a dedicated Linear choice and a generic MCP choice referencing the same server never share an ID. Reserved mutation capabilities are never asked or offered.
+Question IDs are capability-derived. Choice IDs are deterministic and unique across provider, binding kind, scope, and server or executable identity: a dedicated Linear choice and a generic MCP choice referencing the same server never share an ID. Dedicated GitHub, Linear, and Figma MCP choices are emitted only when the server name matches that provider's tokens. Reserved mutation capabilities are never asked or offered.
 
 `--yes` without `--answers` remains the deterministic no-binding path. `--expect-digest` names the plan digest from step 3, never `questionSetDigest`.
 
@@ -941,7 +948,7 @@ Initial checks:
 - optional local Claude executable detection
 - capability bindings: unknown provider, unsupported capability, a reserved mutation capability used as a connection key, missing project-scoped server, an unverifiable user-, local-, or cloud-scoped server, an absent `cli` executable, and unbound capabilities
 
-Connection diagnostics never execute a provider, never contact a network, and never print raw provider or CLI output. An unverifiable connection is a warning, not an error: a user-, local-, or cloud-scoped MCP server is a legitimate setup that repository files cannot confirm, and the same configuration must stay usable in local and Claude Code cloud sessions.
+Connection diagnostics never execute a provider, never contact a network, and never print raw provider or CLI output. An unverifiable connection is a warning, not an error: a user-, local-, or cloud-scoped MCP server is a legitimate setup that repository files cannot confirm, and the same configuration must stay usable in local and Claude Code cloud sessions. A dedicated provider bound to an MCP server whose name does not identify that provider is `CONNECTION_SERVER_PROVIDER_MISMATCH`, an error.
 
 Exit codes:
 

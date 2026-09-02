@@ -16,6 +16,8 @@ private until the owner explicitly approves an npm publication.
 ### Changed
 
 - Configuration migrations are comment-preserving, one version at a time. A non-empty legacy `providers` map blocks.
+- The `/wrkrs` project skill sets `background: false` so Claude Code waits for the Product Manager instead of returning immediately.
+- Dedicated GitHub, Linear, and Figma bindings are offered and accepted only when an MCP server name contains a matching token (`github`/`gh`, `linear`, `figma`). Unmatched servers stay available through the generic `mcp` provider; a hand-edited mismatch is `CONNECTION_SERVER_PROVIDER_MISMATCH`.
 
 ### Security
 

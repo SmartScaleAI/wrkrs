@@ -109,6 +109,43 @@ try {
       if (!existsSync(path.join(target, file))) throw new Error(`missing ${file}`)
     }
   })
+  step('installed team contract: waiting skill and four named agents', () => {
+    const skillText = readFileSync(
+      path.join(target, '.claude', 'skills', 'wrkrs', 'SKILL.md'),
+      'utf8',
+    )
+    const required = [
+      'name: wrkrs',
+      'context: fork',
+      'background: false',
+      'agent: wrkrs-product-manager',
+      'disable-model-invocation: true',
+    ]
+    for (const line of required) {
+      if (!skillText.includes(`\n${line}\n`) && !skillText.startsWith(`${line}\n`)) {
+        throw new Error(`skill missing ${line}`)
+      }
+    }
+    const agents = [
+      'wrkrs-product-manager',
+      'wrkrs-product-designer',
+      'wrkrs-software-engineer',
+      'wrkrs-qa-engineer',
+    ]
+    for (const name of agents) {
+      const file = path.join(target, '.claude', 'agents', `${name}.md`)
+      if (!existsSync(file)) throw new Error(`missing agent ${name}`)
+      const text = readFileSync(file, 'utf8')
+      if (!text.includes(`\nname: ${name}\n`)) throw new Error(`agent ${name} name mismatch`)
+    }
+  })
+  step('optional claude --version is recorded when present and ignored when absent', () => {
+    try {
+      run('claude', ['--version'])
+    } catch {
+      // Claude Code is not required. Never invoke an authenticated session.
+    }
+  })
   step('wrkrs check', () => {
     const result = runCli(bin, ['check'], target)
     if (result.code !== 0) throw new Error(`exit ${result.code}: ${result.stdout}${result.stderr}`)

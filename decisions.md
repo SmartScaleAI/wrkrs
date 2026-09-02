@@ -612,6 +612,25 @@ Rationale:
 
 Scope is unchanged: Increment 3 stays split into 3A and 3B, and this record adds no durable task state, no runtime adapter, no MCP installation, no provider authentication, no remote mutation, and no hosted control plane. The owner approved this record on 2026-09-01. Increments 3A and 3B are implemented.
 
+### A-025: Waiting skill, dedicated MCP name matching, installed-team contract
+
+Status: Implemented on 2026-09-02  
+Date: 2026-09-02
+
+Three post-MVP defects in the installed Claude Code team.
+
+Decision:
+
+- **`/wrkrs` waits.** The project skill is an explicit entry point that must not return until the Product Manager finishes. The generated skill frontmatter includes `background: false` next to `context: fork` and `agent: wrkrs-product-manager`. `wrkrs check` rejects any other `background` value with `CLAUDE_SKILL_FRONTMATTER_INVALID`.
+- **Dedicated providers do not bind arbitrary MCP servers.** GitHub, Linear, and Figma may bind an MCP server only when the server name, split on non-alphanumeric characters, contains a matching token (`github`/`gh`, `linear`, `figma`). Setup does not offer a dedicated-provider choice for an unmatched name. A hand-edited mismatch is `CONNECTION_SERVER_PROVIDER_MISMATCH` (error), does not resolve, and does not emit `CONNECTION_OK`. The generic `mcp` provider remains the escape hatch for every permitted server name, including names that also match a dedicated provider. Diagnostics never echo the untrusted server name.
+- **Installed-team smoke is an artifact contract, not a live Claude session.** After `init --yes`, tests and the packed-tarball smoke assert the skill wait fields, the four namespaced agent files with matching `name` frontmatter, and a passing `wrkrs check`. If a `claude` executable is on PATH, only `claude --version` may run. Absence of Claude Code never fails CI. wrkrs never starts an authenticated or paid Claude session as a test.
+
+Rationale:
+
+- A background skill returns control before the team has done any work, which makes `/wrkrs` look installed and idle at the same time.
+- Offering every `.mcp.json` server as GitHub, Linear, and Figma treated a tracker named `fake-tracker` as those products. Name-token matching is the strongest check available without contacting a network or reading server config that may contain secrets. Generic `mcp` keeps unsupported tools reachable.
+- A live Claude Code invocation needs credentials, network, and a paid session this repository's CI must not assume. The files Claude would read are the contract wrkrs can prove.
+
 ## Deferred decisions
 
 ### D-001: Exact provider authentication and capability mappings

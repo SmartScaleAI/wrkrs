@@ -64,6 +64,7 @@ describe('Claude Code adapter compile', () => {
     const fields = parseFrontmatter(skill.content)!.fields
     expect(fields.get('name')).toBe('wrkrs')
     expect(fields.get('context')).toBe('fork')
+    expect(fields.get('background')).toBe('false')
     expect(fields.get('agent')).toBe('wrkrs-product-manager')
     expect(fields.get('disable-model-invocation')).toBe('true')
     expect(fields.get('argument-hint')).toBe('<requested outcome>')
@@ -170,5 +171,41 @@ describe('Claude Code adapter validate', () => {
     expect(codes).toContain('CLAUDE_SKILL_FRONTMATTER_INVALID')
     expect(codes).toContain('CLAUDE_COMPONENT_UNEXPECTED')
     expect(codes).not.toContain('CLAUDE_ADAPTER_OK')
+  })
+
+  it('151: rejects a skill that would run /wrkrs in the background', async () => {
+    const root = makeTempDir()
+    cleanup.push(root)
+    const fs = createNodeFileSystem()
+    for (const component of adapter.compile({ roster, config, roles })) {
+      const target = path.join(root, ...component.path.split('/'))
+      mkdirSync(path.dirname(target), { recursive: true })
+      writeFileSync(target, component.content)
+    }
+    writeFileSync(
+      path.join(root, '.claude', 'skills', 'wrkrs', 'SKILL.md'),
+      [
+        '---',
+        'name: wrkrs',
+        'description: Run the team.',
+        'disable-model-invocation: true',
+        'context: fork',
+        'background: true',
+        'agent: wrkrs-product-manager',
+        '---',
+        '',
+        'body',
+        '',
+      ].join('\n'),
+    )
+    const invalid = await adapter.validate({ root, fs, config, manifest: null })
+    const background = invalid.find(
+      (diagnostic) =>
+        diagnostic.code === 'CLAUDE_SKILL_FRONTMATTER_INVALID' &&
+        diagnostic.details['field'] === 'background',
+    )
+    expect(background?.message).toContain('background')
+    expect(background?.message).toContain('false')
+    expect(invalid.map((diagnostic) => diagnostic.code)).not.toContain('CLAUDE_ADAPTER_OK')
   })
 })

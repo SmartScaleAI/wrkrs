@@ -1,7 +1,7 @@
 import type { ReadCapabilityId } from '../core/capabilities.js'
 import { questionIdFor, READ_CAPABILITY_IDS } from '../core/capabilities.js'
 import type { BindingKind, BindingScope, ConnectionBinding } from '../core/connections.js'
-import { PROVIDER_IDS, type ProviderId } from '../core/connections.js'
+import { mcpServerMatchesProvider, PROVIDER_IDS, type ProviderId } from '../core/connections.js'
 import { isConnectionIdentifier } from '../core/sanitize.js'
 import type { ProviderRegistry } from '../core/provider.js'
 import { hashCanonicalJson } from '../platform/hash.js'
@@ -70,6 +70,7 @@ export function discoverQuestionSet(input: {
       if (!provider || !provider.capabilities.includes(capability)) continue
       if (provider.kinds.includes('mcp-server')) {
         for (const server of servers) {
+          if (!mcpServerMatchesProvider(provider.id, server)) continue
           choices.push({
             id: choiceIdFor({
               provider: provider.id,
