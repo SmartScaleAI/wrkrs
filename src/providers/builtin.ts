@@ -1,5 +1,12 @@
 import type { ReadCapabilityId } from '../core/capabilities.js'
-import type { ProviderDefinition, ProviderGuidance } from '../core/provider.js'
+import type { DedicatedProviderId } from '../core/connections.js'
+import { mcpServerMatchesProvider } from '../core/connections.js'
+import { createDiagnostic, type Diagnostic } from '../core/diagnostics.js'
+import type {
+  ProviderDefinition,
+  ProviderGuidance,
+  ProviderProbeContext,
+} from '../core/provider.js'
 import type { ProviderBindingContext } from '../core/provider.js'
 
 function guidance(summary: string, instructions: readonly string[]): ProviderGuidance {
@@ -29,16 +36,40 @@ function describeDedicated(
   ])
 }
 
+function hasMatchingMcp(context: ProviderProbeContext, providerId: DedicatedProviderId): boolean {
+  return context.projectServers.some((server) => mcpServerMatchesProvider(providerId, server))
+}
+
+function dedicatedMcpValidate(providerId: DedicatedProviderId) {
+  return (context: ProviderBindingContext): Diagnostic[] => {
+    if (context.binding.kind !== 'mcp-server') return []
+    if (mcpServerMatchesProvider(providerId, context.binding.server)) return []
+    return [
+      createDiagnostic(
+        'CONNECTION_SERVER_PROVIDER_MISMATCH',
+        'error',
+        `MCP server name does not identify the ${providerId} provider`,
+        {
+          path: `.wrkrs/config.yaml#connections.${context.capability}`,
+          remediation:
+            'Bind a server whose name contains a github, gh, linear, or figma token, or use the generic mcp provider',
+          details: { capability: context.capability, provider: providerId },
+        },
+      ),
+    ]
+  }
+}
+
 const github: ProviderDefinition = {
   id: 'github',
   title: 'GitHub',
   capabilities: ['source-control-context', 'pull-request-context'],
   kinds: ['mcp-server', 'cli'],
   probe(context) {
-    const available = context.projectServers.length > 0 || context.cliExecutables.includes('gh')
+    const available = hasMatchingMcp(context, 'github') || context.cliExecutables.includes('gh')
     return { available, findings: [] }
   },
-  validate: () => [],
+  validate: dedicatedMcpValidate('github'),
   describe: (context) =>
     describeDedicated('GitHub', context, 'branches, commits, diffs, and pull requests'),
 }
@@ -49,9 +80,9 @@ const linear: ProviderDefinition = {
   capabilities: ['work-item-context'],
   kinds: ['mcp-server'],
   probe(context) {
-    return { available: context.projectServers.length > 0, findings: [] }
+    return { available: hasMatchingMcp(context, 'linear'), findings: [] }
   },
-  validate: () => [],
+  validate: dedicatedMcpValidate('linear'),
   describe: (context) => describeDedicated('Linear', context, 'work items and acceptance criteria'),
 }
 
@@ -61,9 +92,9 @@ const figma: ProviderDefinition = {
   capabilities: ['design-file-context', 'design-comment-context'],
   kinds: ['mcp-server'],
   probe(context) {
-    return { available: context.projectServers.length > 0, findings: [] }
+    return { available: hasMatchingMcp(context, 'figma'), findings: [] }
   },
-  validate: () => [],
+  validate: dedicatedMcpValidate('figma'),
   describe: (context) => describeDedicated('Figma', context, 'design files and design comments'),
 }
 

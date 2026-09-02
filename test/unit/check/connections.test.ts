@@ -179,6 +179,59 @@ describe('connection check and answers input', () => {
     expect(JSON.stringify(unknown)).not.toContain('\u001b')
   })
 
+  it('152: a dedicated provider bound to an existing unmatched MCP server is a mismatch, not OK', async () => {
+    const root = createFixtureRepository('existing-claude-repository', { commit: true })
+    cleanup.push(root)
+    const deps = createTestDependencies()
+    const ports = createTestPorts()
+    const prepared = await prepareInit(root, deps, ports)
+    if (!prepared.ok) throw prepared.error
+    expect((await applyPreparedInit(prepared.value, deps, ports)).status).toBe('applied')
+    const configPath = path.join(root, '.wrkrs', 'config.yaml')
+    const original = readFileSync(configPath, 'utf8')
+    writeFileSync(
+      configPath,
+      original.replace(
+        'connections: {}',
+        [
+          'connections:',
+          '  source-control-context:',
+          '    provider: github',
+          '    kind: mcp-server',
+          '    server: fake-tracker',
+          '    scope: project',
+        ].join('\n'),
+      ),
+    )
+    const report = await runCheck(
+      {
+        cwd: root,
+        wrkrsVersion: deps.wrkrsVersion,
+        adapters: deps.adapters,
+        providers: deps.providers,
+      },
+      ports,
+    )
+    expect(report.ok).toBe(false)
+    const mismatch = report.diagnostics.find(
+      (item) => item.code === 'CONNECTION_SERVER_PROVIDER_MISMATCH',
+    )
+    expect(mismatch?.severity).toBe('error')
+    expect(mismatch?.path).toContain('source-control-context')
+    expect(
+      report.diagnostics.find((item) => item.code === 'CONNECTION_SERVER_MISSING'),
+    ).toBeUndefined()
+    expect(
+      report.diagnostics.find(
+        (item) =>
+          item.code === 'CONNECTION_OK' &&
+          typeof item.path === 'string' &&
+          item.path.includes('source-control-context'),
+      ),
+    ).toBeUndefined()
+    expect(JSON.stringify(report.diagnostics)).not.toContain('fake-tracker')
+  })
+
   it('138: --answers rejects a final symlink, a non-regular file, and an oversize file', async () => {
     const dir = mkdtempSync(path.join(tmpdir(), 'wrkrs-answers-port-'))
     cleanup.push(dir)

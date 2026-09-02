@@ -110,12 +110,13 @@ export function resolveBinding(
   }
   const verification = verifyBinding(binding, evidence)
   const context: ProviderBindingContext = { capability, binding, verification }
+  const fromProvider = [...provider.validate(context)]
+  const combined = [...diagnostics, ...fromProvider]
+  if (combined.some((item) => item.severity === 'error')) {
+    return { diagnostics: combined, resolved: null }
+  }
   return {
-    diagnostics: [
-      ...diagnostics,
-      ...provider.validate(context),
-      connectionDiagnostic(capability, binding, verification, path),
-    ],
+    diagnostics: [...combined, connectionDiagnostic(capability, binding, verification, path)],
     resolved: {
       capability,
       binding,

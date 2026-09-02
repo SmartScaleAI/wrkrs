@@ -7,8 +7,10 @@ import {
   READ_CAPABILITY_IDS,
   RESERVED_MUTATION_CAPABILITY_IDS,
 } from '../../../src/core/capabilities.js'
+import { resolveBinding } from '../../../src/core/provider.js'
 import { builtinProviders } from '../../../src/providers/builtin.js'
 import { createBuiltinProviderRegistry } from '../../../src/providers/index.js'
+import { mcpServerMatchesProvider } from '../../../src/core/connections.js'
 import { REPOSITORY_ROOT } from '../../helpers/temp.js'
 
 describe('Increment 3B registered providers', () => {
@@ -100,5 +102,57 @@ describe('Increment 3B registered providers', () => {
     const registry = createBuiltinProviderRegistry()
     expect(registry.ids).toHaveLength(5)
     expect(registry.get('github')?.title).toBe('GitHub')
+  })
+
+  it('dedicated MCP names match provider tokens; unmatched names stay generic mcp', () => {
+    expect(mcpServerMatchesProvider('github', 'github')).toBe(true)
+    expect(mcpServerMatchesProvider('github', 'github.com')).toBe(true)
+    expect(mcpServerMatchesProvider('github', 'my-gh-mcp')).toBe(true)
+    expect(mcpServerMatchesProvider('linear', 'linear')).toBe(true)
+    expect(mcpServerMatchesProvider('figma', 'figma-dev')).toBe(true)
+    expect(mcpServerMatchesProvider('github', 'fake-tracker')).toBe(false)
+    expect(mcpServerMatchesProvider('linear', 'fake-tracker')).toBe(false)
+    expect(mcpServerMatchesProvider('figma', 'github')).toBe(false)
+    expect(mcpServerMatchesProvider('mcp', 'fake-tracker')).toBe(true)
+
+    const github = builtinProviders().find((provider) => provider.id === 'github')!
+    expect(
+      github.probe({ snapshot: {} as never, projectServers: ['fake-tracker'], cliExecutables: [] })
+        .available,
+    ).toBe(false)
+    expect(
+      github.probe({ snapshot: {} as never, projectServers: ['github'], cliExecutables: [] })
+        .available,
+    ).toBe(true)
+    expect(
+      github.probe({ snapshot: {} as never, projectServers: [], cliExecutables: ['gh'] }).available,
+    ).toBe(true)
+    const mismatch = github.validate({
+      capability: 'source-control-context',
+      binding: { provider: 'github', kind: 'mcp-server', server: 'fake-tracker', scope: 'project' },
+      verification: 'verified-project',
+    })
+    expect(mismatch.map((item) => item.code)).toEqual(['CONNECTION_SERVER_PROVIDER_MISMATCH'])
+
+    const registry = createBuiltinProviderRegistry()
+    const outcome = resolveBinding(
+      'source-control-context',
+      {
+        provider: 'github',
+        kind: 'mcp-server',
+        server: 'fake-tracker',
+        scope: 'project',
+      },
+      registry.get('github'),
+      {
+        projectServers: new Set(['fake-tracker']),
+        cliExecutables: new Set(),
+      },
+    )
+    expect(outcome.resolved).toBeNull()
+    expect(outcome.diagnostics.map((item) => item.code)).toEqual([
+      'CONNECTION_SERVER_PROVIDER_MISMATCH',
+    ])
+    expect(JSON.stringify(outcome.diagnostics)).not.toContain('fake-tracker')
   })
 })

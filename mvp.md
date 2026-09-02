@@ -126,7 +126,7 @@ Role files are canonical portable role definitions. They describe responsibiliti
     .claude/agents/wrkrs-qa-engineer.md
     .claude/skills/wrkrs/SKILL.md
 
-The skill invokes the Product Manager worker and passes the user's requested outcome. It uses stable Claude subagents, not experimental Agent Teams. It grants no new permission and makes no settings, hooks, CLAUDE.md, or MCP change in this slice.
+The skill invokes the Product Manager worker, waits for that worker (`background: false`), and passes the user's requested outcome. It uses stable Claude subagents, not experimental Agent Teams. It grants no new permission and makes no settings, hooks, CLAUDE.md, or MCP change in this slice.
 
 ### Basic project detection
 
@@ -776,7 +776,7 @@ Questions are asked only when stdin is a terminal and neither `--yes` nor `--jso
 
 No answer is ever guessed or defaulted to a vendor. The default for every question is "skip", which is also the deterministic non-interactive answer, so a non-interactive run is exactly an interactive run where every question was skipped.
 
-Each question offers only choices derived from the registered provider definitions and from what the scan actually verified — the exact MCP server names read from `.mcp.json` — plus the manual fallback and skip. There is no opaque "Other" free-text option. A connection wrkrs cannot see is reachable through the generic existing-MCP binding by naming the server on that capability's question, or through the manual fallback. Reserved mutation capabilities are never asked or offered.
+Each question offers only choices derived from the registered provider definitions and from what the scan actually verified — the exact MCP server names read from `.mcp.json` — plus the manual fallback and skip. Dedicated GitHub, Linear, and Figma MCP choices appear only when a verified server name contains a matching token (`github`/`gh`, `linear`, `figma`); unmatched names remain available through the generic existing-MCP provider. There is no opaque "Other" free-text option. A connection wrkrs cannot see is reachable through the generic existing-MCP binding by naming the server on that capability's question, or through the manual fallback. Reserved mutation capabilities are never asked or offered.
 
 The canonical question set is one question per Increment 3 read capability. Question IDs are capability-derived. Human interactive setup and machine discovery emit the same set, in this order:
 
@@ -914,6 +914,7 @@ The adapter never emits an MCP server definition, never writes an `mcpServers` b
 | `CONNECTION_CAPABILITY_RESERVED` | error | A `connections` key is a reserved mutation capability (`pull-request-comment`, `work-item-update`, or `design-update`) |
 | `CONNECTION_BINDING_INVALID` | error | The binding violates the discriminated schema: wrong kind fields, unknown key, or a capability list |
 | `CONNECTION_IDENTIFIER_REJECTED` | error | A server name, executable, or note failed identifier validation and was not compiled into any file |
+| `CONNECTION_SERVER_PROVIDER_MISMATCH` | error | A dedicated provider is bound to an MCP server whose name does not identify that provider |
 | `CONNECTION_CAPABILITY_UNBOUND` | info | An Increment 3 read capability has no binding |
 
 Reserved mutation capabilities are never reported as unbound. There is no ambiguity diagnostic: the capability-keyed shape cannot express two routes for one capability, and a repeated key is already a parse error.
@@ -1162,6 +1163,14 @@ Numbering continues from 143.
 | 148 | README documents `connections` and `init --questions` / `--answers` / `--expect-digest` | U |
 | 149 | The package remains private, MIT-licensed, engine `>=22.12`, with the single `wrkrs` bin | U |
 | 150 | Acceptance tests 1 through 143 continue to pass | U, I |
+
+### Follow-up: waiting skill, dedicated MCP matching, installed-team contract
+
+| # | Test | Type |
+| --- | --- | --- |
+| 151 | The wrkrs skill frontmatter includes `background: false` with `context: fork` and `agent: wrkrs-product-manager`; `check` rejects any other `background` value | U, I |
+| 152 | Dedicated GitHub, Linear, and Figma providers are offered and validated only for MCP server names that contain a matching token (`github`/`gh`, `linear`, `figma`); unmatched names remain available through generic `mcp`; a hand-edited mismatch is `CONNECTION_SERVER_PROVIDER_MISMATCH` and is not `CONNECTION_OK` | U, I |
+| 153 | After `init --yes`, the installed team contract holds: four namespaced agents exist with matching `name` fields, the skill waits and delegates to `wrkrs-product-manager`, and `wrkrs check` passes. Presence of a `claude` executable is recorded via `--version` only and never fails CI | I |
 
 ### Fourth increment deferrals
 

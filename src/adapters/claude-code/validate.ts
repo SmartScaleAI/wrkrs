@@ -193,6 +193,7 @@ export async function validateClaudeCodeInstallation(
     const expectations: ReadonlyArray<readonly [string, string]> = [
       ['name', SKILL_NAME],
       ['context', 'fork'],
+      ['background', 'false'],
       ['agent', expectedAgent],
       ['disable-model-invocation', 'true'],
     ]

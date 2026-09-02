@@ -30,6 +30,35 @@ export function isProviderId(value: string): value is ProviderId {
   return (PROVIDER_IDS as readonly string[]).includes(value)
 }
 
+export const DEDICATED_PROVIDER_IDS = ['github', 'linear', 'figma'] as const
+export type DedicatedProviderId = (typeof DEDICATED_PROVIDER_IDS)[number]
+
+export function isDedicatedProviderId(value: string): value is DedicatedProviderId {
+  return (DEDICATED_PROVIDER_IDS as readonly string[]).includes(value)
+}
+
+/** Name tokens that identify a dedicated provider's own MCP server. */
+const DEDICATED_MCP_NAME_TOKENS: Readonly<Record<DedicatedProviderId, readonly string[]>> = {
+  github: ['github', 'gh'],
+  linear: ['linear'],
+  figma: ['figma'],
+}
+
+/**
+ * Dedicated providers may only bind MCP servers whose names contain one of
+ * their tokens (`github`/`gh`, `linear`, `figma`). The generic `mcp` provider
+ * may bind any permitted server name; `manual` has no server.
+ */
+export function mcpServerMatchesProvider(providerId: ProviderId, server: string): boolean {
+  if (providerId === 'mcp' || providerId === 'manual') return true
+  if (!isDedicatedProviderId(providerId)) return false
+  const tokens = server
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter((token) => token.length > 0)
+  return DEDICATED_MCP_NAME_TOKENS[providerId].some((alias) => tokens.includes(alias))
+}
+
 export interface McpServerBinding {
   readonly provider: Exclude<ProviderId, 'manual'>
   readonly kind: 'mcp-server'
