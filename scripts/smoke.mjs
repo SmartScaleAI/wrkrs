@@ -66,6 +66,7 @@ try {
       'schema/wrkrs-config.schema.json',
       'LICENSE',
       'README.md',
+      'CHANGELOG.md',
       'package.json',
     ]
     for (const file of required) {

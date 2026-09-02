@@ -1,6 +1,6 @@
 # wrkrs CLI architecture
 
-Status: Approved by the owner on 2026-08-29; first and second increments implemented; third increment plan approved by the owner on 2026-09-01 (decisions.md A-022, A-023, A-024); Increments 3A and 3B implemented
+Status: Approved by the owner on 2026-08-29; first, second, and third increments implemented; Increment 4 (release hardening) in progress
 Architecture review date: 2026-08-29
 
 ## Context

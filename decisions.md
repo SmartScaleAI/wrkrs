@@ -646,7 +646,7 @@ The MVP uses an explicit built-in registry. A plugin marketplace and arbitrary d
 
 Status: Deferred
 
-Define npm provenance, signing, release workflow, and changelog policy during release hardening. Publication and release always require explicit approval.
+Define npm provenance, signing, release workflow, and changelog policy during release hardening. Increment 4 adds CI, migration fixtures, README/CHANGELOG, and keeps `private: true`. Publication and release always require explicit approval.
 
 ### D-006: Hosted control plane
 
@@ -678,6 +678,7 @@ Architecture approval: Approved by the owner on 2026-08-29
 Vertical slice approval: Approved by the owner on 2026-08-29  
 Production dependency approval: Approved by the owner on 2026-08-29 (commander, zod, yaml)  
 Implementation repository selection: Approved by the owner on 2026-08-29 (github.com/SmartScaleAI/wrkrs, public, MIT)  
-Increment 3 plan approval: Approved by the owner on 2026-09-01 (A-022, A-023, A-024); Increments 3A and 3B implemented
+Increment 3 plan approval: Approved by the owner on 2026-09-01 (A-022, A-023, A-024); Increments 3A and 3B implemented  
+Increment 4: release hardening in progress (CI, migration fixtures, documentation); npm publication not approved
 
 Implementation status: the first vertical slice was implemented on 2026-08-29, committed as a8e4a5ba567dc06a96868bf941b242a00e30df49 on review/mvp-vertical-slice, and pushed to origin for independent review; the remote's default branch main also points at that commit. The first review remediation (A-016) was committed as baab7195004463c06ff3bc0aa1b8b765eb34df0b on review/mvp-vertical-slice and pushed; the second (A-017) as 14c8c4c0890196741a86e7ad045c04bb5ef0e81a; the third (A-018) as 61df451e41d6884082983af1376c5a030a300f7b; the fourth (A-019) as 0b8b9140328e7678ee85ce5b4c9d50de0e17c10a; the fifth (A-020) follows on the same branch. No pull request, npm publication, deployment, merge, or release has occurred.

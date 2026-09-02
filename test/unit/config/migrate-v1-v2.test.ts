@@ -1,40 +1,22 @@
+import { readFileSync } from 'node:fs'
+import * as path from 'node:path'
+
 import { describe, expect, it } from 'vitest'
 
 import { parseConfigDocument } from '../../../src/config/load.js'
 import { migrateConfigDocumentV1ToV2 } from '../../../src/config/migrations/index.js'
-import { serializeConfig } from '../../../src/config/serialize.js'
-import type { WrkrsConfig } from '../../../src/core/configuration.js'
+import { REPOSITORY_ROOT } from '../../helpers/temp.js'
 
-const base: WrkrsConfig = {
-  schemaVersion: 3,
-  preset: { id: 'product-engineering', version: 1 },
-  runtime: { primary: 'claude-code' },
-  roster: {
-    primaryRole: 'product-manager',
-    roles: [{ id: 'product-manager', source: '.wrkrs/roles/product-manager.md' }],
-  },
-  governance: {
-    requirePlanApproval: true,
-    requireDesignApproval: true,
-    requireOwnerTestForUserFacingOrNativeWork: true,
-    requireExplicitReleaseApproval: true,
-  },
-  execution: { profile: 'adaptive' },
-  connections: {},
-  extensions: {},
-}
-
-function v1FromCurrent(text: string): string {
-  return text
-    .replace('schema version 3', 'schema version 1')
-    .replace('schemaVersion: 3', 'schemaVersion: 1')
-    .replace(/\nexecution:\n  profile: adaptive\n/, '\n')
-    .replace(/\nconnections: \{\}\n/, '\nproviders: {}\n')
+function fixture(name: string): string {
+  return readFileSync(
+    path.join(REPOSITORY_ROOT, 'test', 'fixtures', 'config-migrations', name),
+    'utf8',
+  )
 }
 
 describe('comment-preserving config v1 → v2 migration', () => {
   it('110: migrates a version 1 configuration to version 2, adding execution.profile: adaptive', () => {
-    const v1 = v1FromCurrent(serializeConfig(base))
+    const v1 = fixture('config-v1.yaml')
     const parsedV1 = parseConfigDocument(v1)
     expect(parsedV1.ok).toBe(true)
     if (!parsedV1.ok) return
@@ -54,33 +36,7 @@ describe('comment-preserving config v1 → v2 migration', () => {
   })
 
   it('114: preserves owner comments, key order, blank lines, and extensions; only migrated keys differ', () => {
-    const withComments = [
-      '# wrkrs repository configuration (schema version 1).',
-      '# owner-header-comment',
-      '',
-      'schemaVersion: 1',
-      'preset:',
-      '  id: product-engineering',
-      '  version: 1',
-      'runtime:',
-      '  primary: claude-code',
-      '# roster-comment',
-      'roster:',
-      '  primaryRole: product-manager',
-      '  roles:',
-      '    - id: product-manager',
-      '      source: .wrkrs/roles/product-manager.md',
-      '',
-      'governance:',
-      '  requirePlanApproval: true',
-      '  requireDesignApproval: true',
-      '  requireOwnerTestForUserFacingOrNativeWork: true',
-      '  requireExplicitReleaseApproval: true',
-      'providers: {}',
-      'extensions:',
-      '  ownerNote: keep-me',
-      '',
-    ].join('\n')
+    const withComments = fixture('config-v1.yaml')
     const migrated = migrateConfigDocumentV1ToV2(withComments)
     expect(migrated.ok).toBe(true)
     if (!migrated.ok) return
@@ -98,27 +54,7 @@ describe('comment-preserving config v1 → v2 migration', () => {
   })
 
   it('115: preserves an owner edit elsewhere in the file', () => {
-    const edited = [
-      'schemaVersion: 1',
-      'preset:',
-      '  id: product-engineering',
-      '  version: 1',
-      'runtime:',
-      '  primary: claude-code',
-      'roster:',
-      '  primaryRole: product-manager',
-      '  roles:',
-      '    - id: product-manager',
-      '      source: .wrkrs/roles/product-manager.md',
-      'governance:',
-      '  requirePlanApproval: false',
-      '  requireDesignApproval: true',
-      '  requireOwnerTestForUserFacingOrNativeWork: true',
-      '  requireExplicitReleaseApproval: true',
-      'providers: {}',
-      'extensions: {}',
-      '',
-    ].join('\n')
+    const edited = fixture('config-v1-governance-edit.yaml')
     const migrated = migrateConfigDocumentV1ToV2(edited)
     expect(migrated.ok).toBe(true)
     if (!migrated.ok) return

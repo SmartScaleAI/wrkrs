@@ -16,25 +16,30 @@ Install a structured AI development team into an existing Git repository and run
 npx wrkrs init              # analyze, show the plan, confirm, install
 npx wrkrs init --dry-run    # show findings, roster, diffs, and plan digest; write nothing
 npx wrkrs init --yes        # install without an interactive confirmation
+npx wrkrs init --json --questions
+npx wrkrs init --json --dry-run --answers answers.json
+npx wrkrs init --json --yes --answers answers.json --expect-digest sha256:…
 npx wrkrs update            # reconcile the installation with this version and your config
 npx wrkrs uninstall         # remove what wrkrs installed and still recognizes
 npx wrkrs check             # read-only installation health check
 ```
 
-`init`, `update`, and `uninstall` all accept `--dry-run`, `--yes`, and `--json`; `check` accepts `--json`. Every command accepts `--cwd <directory>`; the Git worktree root is always resolved from there.
+`init`, `update`, and `uninstall` all accept `--dry-run`, `--yes`, and `--json`; `check` accepts `--json`. Every command accepts `--cwd <directory>`; the Git worktree root is always resolved from there. `--yes` without `--answers` installs empty `connections`. `--answers` is a read-only file outside the repository filesystem port; a final symlink, a non-regular file, and a file over 64 KiB are rejected.
 
 Exit codes: `0` success (warnings allowed), `1` error or blocked plan, `2` invalid usage.
 
 ## What gets installed
 
 ```text
-.wrkrs/config.yaml                  seeded   editable roster, specializations, governance
+.wrkrs/config.yaml                  seeded   editable roster, specializations, governance, connections
 .wrkrs/schema.json                  managed  JSON Schema for config.yaml
 .wrkrs/manifest.json                managed  ownership record with content hashes
 .wrkrs/roles/*.md                   seeded   portable role definitions (canonical)
 .claude/agents/wrkrs-*.md           managed  Claude Code subagent projections
 .claude/skills/wrkrs/SKILL.md       managed  explicit `/wrkrs <outcome>` entry point
 ```
+
+`.wrkrs/config.yaml` is schema version 3. `execution.profile` is the floor the Product Manager may raise and must never lower (`adaptive`, `fast`, `standard`, or `full`). `connections` maps each Increment 3 read capability to at most one existing GitHub, Linear, Figma, generic MCP, or manual binding. wrkrs never installs an MCP server, writes `.mcp.json`, or stores a credential. Reserved mutation capabilities cannot be bound.
 
 wrkrs never edits `CLAUDE.md`, Claude settings, hooks, existing agents, skills, commands, or `.mcp.json`. Conflicting namespaced paths, symlinks, and an unrecognized `.wrkrs` directory block installation instead of being overwritten. Every command runs through a journaled transaction with an exclusive lock, precondition rechecks, post-write verification, and hash-guarded rollback.
 

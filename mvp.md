@@ -1,6 +1,6 @@
 # wrkrs MVP
 
-Status: Locked product scope; first and second increments approved and implemented; third increment plan approved by the owner on 2026-09-01 (decisions.md A-024); Increments 3A and 3B implemented  
+Status: Locked product scope; first, second, and third increments approved and implemented; Increment 4 (release hardening) in progress  
 Last updated: 2026-09-02
 
 ## Product statement
@@ -1130,4 +1130,40 @@ Numbering continues from the second increment, which ended at 73. Increment 3 ac
 
 ### Third increment deferrals
 
-Recorded deliberately, with no placeholder behavior standing in for any of them: `.mcp.json` writes and the `patched` ownership mode; `jsonc-parser`; provider account authentication and token storage; a `wrkrs provider` command; `wrkrs update --interactive` and the machine protocol on `update`, which lands on `init` only; a GUI or any runtime adapter that consumes the machine protocol; a broad provider catalog including Jira as a dedicated provider; mutation capabilities being exercised by any behavior; external ticket, status, and design mutation; durable task context storage and synchronization (D-007, D-008); live orchestration and automated resumption (D-008); additional runtime adapters including Cursor (D-009); hosted state of any kind; measured per-stage timing through transcripts or hooks; and cross-platform CI, which remains Increment 4.
+Recorded deliberately, with no placeholder behavior standing in for any of them: `.mcp.json` writes and the `patched` ownership mode; `jsonc-parser`; provider account authentication and token storage; a `wrkrs provider` command; `wrkrs update --interactive` and the machine protocol on `update`, which lands on `init` only; a GUI or any runtime adapter that consumes the machine protocol; a broad provider catalog including Jira as a dedicated provider; mutation capabilities being exercised by any behavior; external ticket, status, and design mutation; durable task context storage and synchronization (D-007, D-008); live orchestration and automated resumption (D-008); additional runtime adapters including Cursor (D-009); hosted state of any kind; and measured per-stage timing through transcripts or hooks. Cross-platform CI is Increment 4.
+
+## Fourth increment: release hardening
+
+Status: Implemented locally on 2026-09-02. GitHub Actions has not yet run on origin. Publication to npm is not part of this increment.  
+Date proposed: 2026-09-02
+
+### Goal
+
+Make wrkrs verifiable on the platforms it claims to support, keep schema migrations pinned to committed fixtures, and leave the package ready to publish without publishing it.
+
+### Scope
+
+- GitHub Actions `verify` on Ubuntu and macOS for Node 22.12.0 (engine floor) and Node 24 (preferred).
+- A Windows job that only proves fail-closed behavior: `--help` and `--version` work; `init` reports `ENVIRONMENT_CONTAINMENT_UNSUPPORTED` and writes nothing. Full Windows contained I/O stays deferred.
+- Committed configuration migration fixtures for schema versions 1 and 2, including a blocked non-empty `providers` map.
+- README coverage of `connections`, execution profiles, and the machine-driven init protocol.
+- CHANGELOG and package metadata for an eventual release. `private` stays true. No provenance, signing, or `npm publish`.
+
+### Fourth increment acceptance tests
+
+Numbering continues from 143.
+
+| # | Test | Type |
+| --- | --- | --- |
+| 144 | The verify workflow runs Ubuntu and macOS on Node 22.12.0 and Node 24, with contents:read only | U |
+| 145 | Windows CI runs `--help`, `--version`, and fail-closed init; it does not run the POSIX verify suite | U |
+| 146 | Committed version 1 and version 2 configuration fixtures migrate with comments preserved | U |
+| 147 | The committed non-empty `providers` fixture blocks migration | U |
+| 148 | README documents `connections` and `init --questions` / `--answers` / `--expect-digest` | U |
+| 149 | The package remains private, MIT-licensed, engine `>=22.12`, with the single `wrkrs` bin | U |
+| 150 | Acceptance tests 1 through 143 continue to pass | U, I |
+
+### Fourth increment deferrals
+
+npm provenance, signing, trusted publishing, and the actual npm publication (decisions.md D-005). Full Windows contained I/O. Changing the Node engine floor or adding a second runtime.
+

@@ -1,3 +1,6 @@
+import { readFileSync } from 'node:fs'
+import * as path from 'node:path'
+
 import { describe, expect, it } from 'vitest'
 
 import { parseConfigDocument } from '../../../src/config/load.js'
@@ -9,6 +12,14 @@ import {
 } from '../../../src/config/migrations/index.js'
 import { serializeConfig } from '../../../src/config/serialize.js'
 import type { WrkrsConfig, WrkrsConfigV1 } from '../../../src/core/configuration.js'
+import { REPOSITORY_ROOT } from '../../helpers/temp.js'
+
+function fixture(name: string): string {
+  return readFileSync(
+    path.join(REPOSITORY_ROOT, 'test', 'fixtures', 'config-migrations', name),
+    'utf8',
+  )
+}
 
 const v3: WrkrsConfig = {
   schemaVersion: 3,
@@ -99,7 +110,7 @@ describe('configuration connections and v2→v3 migration', () => {
   })
 
   it('111: v2 empty providers migrate to empty connections', () => {
-    const v2 = `${header}\nproviders: {}\nextensions: {}\n`
+    const v2 = fixture('config-v2.yaml')
     const migrated = migrateConfigDocumentV2ToV3(v2)
     expect(migrated.ok).toBe(true)
     if (!migrated.ok) return
@@ -129,26 +140,7 @@ describe('configuration connections and v2→v3 migration', () => {
     expect(step2.ok).toBe(true)
     if (!step2.ok) return
     expect(step2.value.schemaVersion).toBe(3)
-    const chained = migrateConfigDocumentToCurrent(
-      [
-        'schemaVersion: 1',
-        'preset: {id: product-engineering, version: 1}',
-        'runtime: {primary: claude-code}',
-        'roster:',
-        '  primaryRole: product-manager',
-        '  roles:',
-        '    - {id: product-manager, source: .wrkrs/roles/product-manager.md}',
-        'governance:',
-        '  requirePlanApproval: true',
-        '  requireDesignApproval: true',
-        '  requireOwnerTestForUserFacingOrNativeWork: true',
-        '  requireExplicitReleaseApproval: true',
-        'providers: {}',
-        'extensions: {}',
-        '',
-      ].join('\n'),
-      1,
-    )
+    const chained = migrateConfigDocumentToCurrent(fixture('config-v1.yaml'), 1)
     expect(chained.ok).toBe(true)
     if (!chained.ok) return
     expect(chained.value).toMatch(/schemaVersion:\s*3/)
@@ -157,6 +149,12 @@ describe('configuration connections and v2→v3 migration', () => {
   })
 
   it('116/117: a non-empty or hostile providers map blocks migration and never prints keys raw', () => {
+    const blocked = migrateConfigDocumentV2ToV3(fixture('config-v2-blocked-providers.yaml'))
+    expect(blocked.ok).toBe(false)
+    if (!blocked.ok) {
+      expect(blocked.error.code).toBe('CONFIG_MIGRATION_BLOCKED')
+      expect(blocked.error.details?.count).toBe(1)
+    }
     const long = 'A'.repeat(400)
     const v2 = `${header}\nproviders:\n  leftover: {}\n  "${long}": {}\n  "\\u001b[31mred": {}\nextensions: {}\n`
     const migrated = migrateConfigDocumentV2ToV3(v2)
