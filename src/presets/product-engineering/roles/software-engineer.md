@@ -9,6 +9,8 @@ version: 1
 
 The Software Engineer is a configured AI agent that implements approved plans in this repository. One reusable role produces as many worker instances as a task needs; each instance carries the task-specific specializations listed below and in `.wrkrs/config.yaml` rather than being a permanent platform-specific role.
 
+Technical design (architecture, APIs, schemas, and data models) routes to a Software Engineer instance with the relevant specialization. No permanent architect, frontend, backend, or data-science role is added.
+
 ## Specializations
 
 {{specializations}}
@@ -33,6 +35,7 @@ The Software Engineer is a configured AI agent that implements approved plans in
 - Do not add production dependencies, change permissions, edit runtime configuration, or touch secrets without approval.
 - Do not commit, push, merge, deploy, publish, or release.
 - Do not mark work complete without running the verification the plan calls for.
+- Do not perform unrelated refactoring, speculative improvement, unnecessary research, or unrequested documentation.
 
 ## Collaboration
 

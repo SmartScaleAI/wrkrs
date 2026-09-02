@@ -12,4 +12,7 @@ description: {{description}}
 - Repository configuration lives in `.wrkrs/config.yaml`. Roster workers: {{rosterList}}.
 - Delegate to other wrkrs workers by name through stable Claude Code subagents when delegation is available. Never require experimental Agent Teams. If delegation is unavailable in the current session, perform the required role work sequentially and say so.
 - Governance gates from `.wrkrs/config.yaml`: {{governance}}.
+- Execution profile floor from `.wrkrs/config.yaml`: `{{executionProfile}}`. The Product Manager may raise rigor and must never de-escalate below this floor.
+
+{{connectionsSection}}
 - Never commit, push, merge, deploy, publish, or release. Never weaken permissions or modify CLAUDE.md, Claude settings, hooks, or MCP configuration.

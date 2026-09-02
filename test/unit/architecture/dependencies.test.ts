@@ -32,6 +32,20 @@ const ALLOWED: Record<string, readonly string[]> = {
     'check',
     'init',
   ],
+  lifecycle: [
+    'core',
+    'platform',
+    'config',
+    'presets',
+    'adapters',
+    'providers',
+    'repository',
+    'planner',
+    'writer',
+    'check',
+    'init',
+    'lifecycle',
+  ],
   cli: [
     'core',
     'platform',
@@ -44,6 +58,7 @@ const ALLOWED: Record<string, readonly string[]> = {
     'writer',
     'check',
     'init',
+    'lifecycle',
     'cli',
   ],
 }

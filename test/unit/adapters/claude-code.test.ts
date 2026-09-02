@@ -68,6 +68,47 @@ describe('Claude Code adapter compile', () => {
     expect(fields.get('disable-model-invocation')).toBe('true')
     expect(fields.get('argument-hint')).toBe('<requested outcome>')
     expect(skill.content).toContain('$ARGUMENTS')
+    expect(skill.content).toContain('execution.profile')
+    const pm = components.find((component) => component.path.endsWith('wrkrs-product-manager.md'))!
+    expect(pm.content).toContain('Execution profile floor from `.wrkrs/config.yaml`: `adaptive`')
+    expect(pm.content).toContain('Work size')
+    expect(pm.content).toContain('Elapsed time: not measured by wrkrs')
+  })
+
+  it('91/93: projections name a bound server without MCP definitions or tool grants', () => {
+    const components = adapter.compile({
+      roster,
+      config,
+      roles,
+      connections: [
+        {
+          capability: 'work-item-context',
+          binding: {
+            provider: 'mcp',
+            kind: 'mcp-server',
+            server: 'fake-tracker',
+            scope: 'project',
+          },
+          verification: 'verified-project',
+          guidance: {
+            summary: 'Existing MCP server supplies work-item-context (verified-project)',
+            instructions: ['Use the existing MCP server bound for work-item-context.'],
+          },
+        },
+      ],
+    })
+    const joined = components.map((component) => component.content).join('\n')
+    expect(joined).toContain('fake-tracker')
+    expect(joined).toContain('Existing MCP server supplies work-item-context (verified-project)')
+    expect(joined).toContain('Use the existing MCP server bound for work-item-context.')
+    expect(joined).not.toContain('mcpServers')
+    expect(joined).not.toMatch(/https?:\/\//)
+    expect(joined).not.toContain('allowed-tools')
+    for (const component of components) {
+      const fields = parseFrontmatter(component.content)?.fields
+      expect(fields?.has('tools')).toBe(false)
+      expect(fields?.has('permissionMode')).toBe(false)
+    }
   })
 
   it('renders role templates with frontmatter ids and no unresolved placeholders', () => {

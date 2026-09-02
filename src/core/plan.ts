@@ -4,6 +4,8 @@ import type { RosterRecommendation } from './roster.js'
 
 export const PLAN_OUTCOMES = [
   'create',
+  'replace',
+  'remove',
   'structural-merge',
   'reuse',
   'preserve',
@@ -48,6 +50,12 @@ export interface DesiredComponent {
   readonly sourceVersion: number
   readonly component: string
   readonly reason: string
+  /**
+   * When true, update replaces this seeded file even if it drifted from the
+   * last applied hash. Proposed content must be a comment-preserving schema
+   * migration of the current bytes, not a regenerate.
+   */
+  readonly schemaMigration?: true
 }
 
 export interface PlanOperation {
@@ -67,9 +75,11 @@ export interface PlanOperation {
   readonly blocker: Conflict | null
 }
 
+export type PlanCommand = 'init' | 'update' | 'uninstall'
+
 export interface InstallPlan {
   readonly schemaVersion: 1
-  readonly command: 'init'
+  readonly command: PlanCommand
   readonly wrkrsVersion: string
   readonly repositoryRoot: string
   readonly createdAt: string
@@ -79,12 +89,20 @@ export interface InstallPlan {
   readonly operations: readonly PlanOperation[]
   readonly blockers: readonly Conflict[]
   readonly createdDirectories: readonly string[]
+  /**
+   * Directories the manifest recorded as created that an uninstall removes
+   * once every owned file inside them is gone. Deepest first.
+   */
+  readonly removedDirectories: readonly string[]
   readonly manifestPath: string
   readonly digest: string
 }
 
+/** Outcomes that change the working tree; every other outcome is inspection only. */
+export const MUTATING_OUTCOMES: readonly PlanOutcome[] = ['create', 'replace', 'remove']
+
 export function mutatingOperations(plan: InstallPlan): PlanOperation[] {
-  return plan.operations.filter((operation) => operation.outcome === 'create')
+  return plan.operations.filter((operation) => MUTATING_OUTCOMES.includes(operation.outcome))
 }
 
 export function isBlocked(plan: InstallPlan): boolean {

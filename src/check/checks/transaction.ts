@@ -1,20 +1,25 @@
 import { parseJournalDocument } from '../../config/load.js'
 import { createDiagnostic, type Diagnostic } from '../../core/diagnostics.js'
 import { JOURNAL_PATH, LOCK_PATH } from '../../core/ownership.js'
-import { toSystemPath } from '../../platform/paths.js'
-import { readRepositoryText, type CheckContext } from '../context.js'
+import { containmentDiagnostic, type CheckContext } from '../context.js'
 
 export async function checkTransaction(context: CheckContext): Promise<Diagnostic[]> {
   const diagnostics: Diagnostic[] = []
-  const journalSystemPath = toSystemPath(context.root, JOURNAL_PATH)
-  const journalStat = await context.fs.lstat(journalSystemPath)
+  const journalResolved = await context.reader.resolve(JOURNAL_PATH)
+  if (!journalResolved.ok) {
+    diagnostics.push(
+      containmentDiagnostic('TRANSACTION_PATH_UNSAFE', 'error', journalResolved.error),
+    )
+    return diagnostics
+  }
+  const journalStat = journalResolved.value.stat
   if (journalStat) {
     if (journalStat.kind !== 'file') {
       diagnostics.push(
         createDiagnostic(
           'TRANSACTION_JOURNAL_UNREADABLE',
           'error',
-          `Transaction journal path is a ${journalStat.kind}`,
+          `Transaction journal path is a ${journalStat.kind}; wrkrs did not read it`,
           {
             path: JOURNAL_PATH,
             remediation: 'Inspect and remove the path manually',
@@ -22,13 +27,16 @@ export async function checkTransaction(context: CheckContext): Promise<Diagnosti
         ),
       )
     } else {
-      const parsed = parseJournalDocument(await readRepositoryText(context, journalSystemPath))
-      if (!parsed.ok) {
+      const text = await context.reader.readText(JOURNAL_PATH)
+      const parsed = text.ok ? parseJournalDocument(text.value ?? '') : null
+      if (!text.ok) {
+        diagnostics.push(containmentDiagnostic('TRANSACTION_PATH_UNSAFE', 'error', text.error))
+      } else if (!parsed || !parsed.ok) {
         diagnostics.push(
           createDiagnostic(
             'TRANSACTION_JOURNAL_UNREADABLE',
             'error',
-            `Transaction journal could not be parsed: ${parsed.error.message}`,
+            `Transaction journal could not be parsed (${parsed ? parsed.error.code : 'unreadable'})`,
             {
               path: JOURNAL_PATH,
               remediation:
@@ -63,8 +71,10 @@ export async function checkTransaction(context: CheckContext): Promise<Diagnosti
     }
   }
 
-  const lockStat = await context.fs.lstat(toSystemPath(context.root, LOCK_PATH))
-  if (lockStat && context.activeTransactionId === null) {
+  const lockResolved = await context.reader.resolve(LOCK_PATH)
+  if (!lockResolved.ok) {
+    diagnostics.push(containmentDiagnostic('TRANSACTION_PATH_UNSAFE', 'error', lockResolved.error))
+  } else if (lockResolved.value.stat && context.activeTransactionId === null) {
     diagnostics.push(
       createDiagnostic(
         'TRANSACTION_LOCK_PRESENT',

@@ -3,6 +3,7 @@ import { Command, CommanderError } from 'commander'
 import { EXIT_ERROR, EXIT_OK, EXIT_USAGE, isWrkrsError } from '../core/errors.js'
 import { runCheckCommand } from './commands/check.js'
 import { runInitCommand } from './commands/init.js'
+import { runUninstallCommand, runUpdateCommand } from './commands/lifecycle.js'
 import type { CliContext, CliServices, CliStreams } from './context.js'
 import { createStyler } from './output/human-reporter.js'
 
@@ -39,9 +40,66 @@ function buildProgram(options: RunCliOptions, exit: { code: number }): Command {
     .option('--dry-run', 'show the plan and diffs without writing anything', false)
     .option('-y, --yes', 'apply without an interactive confirmation', false)
     .option('--json', 'emit the semantic plan and result as JSON (no terminal styling)', false)
+    .option(
+      '--questions',
+      'emit the setup question set and questionSetDigest; write nothing',
+      false,
+    )
+    .option('--answers <file>', 'apply bindings from a versioned answers document')
+    .option('--expect-digest <digest>', 'require this plan digest before applying')
+    .option('--cwd <directory>', 'directory inside the target Git worktree', options.defaultCwd)
+    .action(
+      async (flags: {
+        dryRun: boolean
+        yes: boolean
+        json: boolean
+        questions: boolean
+        answers?: string
+        expectDigest?: string
+        cwd: string
+      }) => {
+        exit.code = await runInitCommand(
+          {
+            dryRun: flags.dryRun,
+            yes: flags.yes,
+            json: flags.json,
+            questions: flags.questions,
+            answers: flags.answers,
+            expectDigest: flags.expectDigest,
+            cwd: flags.cwd,
+          },
+          context(flags.json || flags.questions),
+        )
+      },
+    )
+
+  program
+    .command('update')
+    .description(
+      'Reconcile the installation with this wrkrs version and .wrkrs/config.yaml, preserving anything you changed.',
+    )
+    .option('--dry-run', 'show the plan and diffs without writing anything', false)
+    .option('-y, --yes', 'apply without an interactive confirmation', false)
+    .option('--json', 'emit the semantic plan and result as JSON (no terminal styling)', false)
     .option('--cwd <directory>', 'directory inside the target Git worktree', options.defaultCwd)
     .action(async (flags: { dryRun: boolean; yes: boolean; json: boolean; cwd: string }) => {
-      exit.code = await runInitCommand(
+      exit.code = await runUpdateCommand(
+        { dryRun: flags.dryRun, yes: flags.yes, json: flags.json, cwd: flags.cwd },
+        context(flags.json),
+      )
+    })
+
+  program
+    .command('uninstall')
+    .description(
+      'Remove what wrkrs installed and still recognizes, preserving anything you changed.',
+    )
+    .option('--dry-run', 'show the plan and diffs without writing anything', false)
+    .option('-y, --yes', 'apply without an interactive confirmation', false)
+    .option('--json', 'emit the semantic plan and result as JSON (no terminal styling)', false)
+    .option('--cwd <directory>', 'directory inside the target Git worktree', options.defaultCwd)
+    .action(async (flags: { dryRun: boolean; yes: boolean; json: boolean; cwd: string }) => {
+      exit.code = await runUninstallCommand(
         { dryRun: flags.dryRun, yes: flags.yes, json: flags.json, cwd: flags.cwd },
         context(flags.json),
       )
@@ -83,8 +141,20 @@ export async function runCli(argv: readonly string[], options: RunCliOptions): P
       options.streams.stderr.write(`error ${error.code}: ${error.message}\n`)
       return error.exitCode
     }
-    const message = error instanceof Error ? (error.stack ?? error.message) : String(error)
-    options.streams.stderr.write(`error UNEXPECTED: ${message}\n`)
+    // Unexpected errors never echo their message: a parser or filesystem error
+    // could carry excerpts of repository content. Only the error class and the
+    // code frames (no message line) are shown, and frames only on request.
+    const name = error instanceof Error ? error.name : typeof error
+    const frames =
+      error instanceof Error && process.env['WRKRS_DEBUG'] && error.stack
+        ? error.stack
+            .split('\n')
+            .filter((line) => /^\s+at /.test(line))
+            .join('\n')
+        : ''
+    options.streams.stderr.write(
+      `error UNEXPECTED: ${name} (message withheld; set WRKRS_DEBUG=1 for stack frames)\n${frames ? frames + '\n' : ''}`,
+    )
     return EXIT_ERROR
   }
 }

@@ -122,12 +122,14 @@ describe('wrkrs check', () => {
         startedAt: '2026-08-29T12:00:00.000Z',
         updatedAt: '2026-08-29T12:00:00.000Z',
         status: 'applying',
+        durability: 'strict',
         operations: [
           {
             path: '.wrkrs/roles/qa-engineer.md',
             kind: 'create-file',
             status: 'retained',
             stagingPath: null,
+            expectedHash: null,
             appliedHash: null,
             note: 'x',
           },
@@ -178,11 +180,14 @@ describe('wrkrs check', () => {
       configPath,
       (await import('node:fs'))
         .readFileSync(configPath, 'utf8')
-        .replace('providers: {}', 'providers:\n  linear: {}'),
+        .replace(
+          'connections: {}',
+          'connections:\n  work-item-context:\n    provider: github\n    kind: mcp-server\n    server: tracker\n    scope: project',
+        ),
     )
     writeFileSync(path.join(root, '.wrkrs', 'roles', 'qa-engineer.md'), '---\nid: not-qa\n---\n')
     const report = await check(root, ports)
-    expect(codes(report)).toContain('CONFIG_PROVIDER_UNKNOWN')
+    expect(codes(report)).toContain('CONNECTION_CAPABILITY_UNSUPPORTED')
     expect(codes(report)).toContain('CONFIG_ROLE_SOURCE_ID_MISMATCH')
     expect(report.ok).toBe(false)
 

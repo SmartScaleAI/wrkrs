@@ -41,7 +41,12 @@ export async function detectWrkrs(context: ScanContext): Promise<WrkrsDetection>
   if (configText !== null) {
     const parsed = parseConfigDocument(configText)
     config = parsed.ok
-      ? { path: CONFIG_PATH, valid: true, schemaVersion: parsed.value.schemaVersion, error: null }
+      ? {
+          path: CONFIG_PATH,
+          valid: true,
+          schemaVersion: parsed.value.sourceSchemaVersion,
+          error: null,
+        }
       : {
           path: CONFIG_PATH,
           valid: false,
@@ -55,11 +60,18 @@ export async function detectWrkrs(context: ScanContext): Promise<WrkrsDetection>
   if (manifestText !== null) {
     const parsed = parseManifestDocument(manifestText)
     manifest = parsed.ok
-      ? { path: MANIFEST_PATH, valid: true, manifest: parsed.value, error: null }
+      ? {
+          path: MANIFEST_PATH,
+          valid: true,
+          manifest: parsed.value.manifest,
+          sourceSchemaVersion: parsed.value.sourceSchemaVersion,
+          error: null,
+        }
       : {
           path: MANIFEST_PATH,
           valid: false,
           manifest: null,
+          sourceSchemaVersion: parsed.error.schemaVersion,
           error: `${parsed.error.code}: ${parsed.error.message}`,
         }
   }

@@ -8,10 +8,12 @@ import {
 } from '../core/diagnostics.js'
 import type { EnvironmentPort, FileSystemPort } from '../core/ports.js'
 import type { ProviderRegistry } from '../core/provider.js'
+import { createRepositoryReader } from '../platform/contained-path.js'
 import type { GitPort } from '../platform/git.js'
 import { locateRepository, type LocateError } from '../repository/locate.js'
 import { checkAdapter } from './checks/adapter.js'
 import { checkConfig } from './checks/config.js'
+import { checkConnections } from './checks/connections.js'
 import { checkEnvironment } from './checks/environment.js'
 import { checkManifest } from './checks/manifest.js'
 import { checkOwnership } from './checks/ownership.js'
@@ -82,20 +84,44 @@ export async function runCheck(input: CheckInput, ports: CheckPorts): Promise<Ch
     }),
   )
 
+  if (!ports.fs.containment.supported) {
+    // Environment and worktree detection are complete; repository content is never read here.
+    diagnostics.push(
+      createDiagnostic(
+        'ENVIRONMENT_CONTAINMENT_UNSUPPORTED',
+        'error',
+        `Strict repository containment is not available here: ${ports.fs.containment.reason}`,
+        {
+          remediation:
+            'Run wrkrs check on macOS or Linux; configuration, manifest, and adapter files were not read',
+          details: { platform: ports.environment.platform },
+        },
+      ),
+    )
+    return finish(located.value.root, diagnostics)
+  }
+
   const context: CheckContext = {
     root: located.value.root,
     fs: ports.fs,
+    reader: await createRepositoryReader(located.value.root, ports.fs),
     environment: ports.environment,
     adapters: input.adapters,
     providers: input.providers,
     wrkrsVersion: input.wrkrsVersion,
     activeTransactionId: input.activeTransactionId ?? null,
     config: null,
+    configSchemaVersion: null,
     manifest: null,
+    manifestSchemaVersion: null,
   }
 
-  diagnostics.push(...(await checkConfig(context)))
+  // The manifest is read first: its state decides how a missing
+  // configuration is judged, because a partial uninstall removes config.yaml
+  // deliberately.
   diagnostics.push(...(await checkManifest(context)))
+  diagnostics.push(...(await checkConfig(context)))
+  diagnostics.push(...(await checkConnections(context)))
   diagnostics.push(...(await checkOwnership(context)))
   diagnostics.push(...(await checkTransaction(context)))
   diagnostics.push(...(await checkAdapter(context)))

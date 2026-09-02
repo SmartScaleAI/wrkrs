@@ -66,6 +66,7 @@ try {
       'schema/wrkrs-config.schema.json',
       'LICENSE',
       'README.md',
+      'CHANGELOG.md',
       'package.json',
     ]
     for (const file of required) {
@@ -112,10 +113,55 @@ try {
     const result = runCli(bin, ['check'], target)
     if (result.code !== 0) throw new Error(`exit ${result.code}: ${result.stdout}${result.stderr}`)
   })
+  step('wrkrs update --dry-run', () => {
+    const before = readFileSync(path.join(target, '.wrkrs', 'manifest.json'), 'utf8')
+    const result = runCli(bin, ['update', '--dry-run'], target)
+    if (result.code !== 0) throw new Error(`exit ${result.code}: ${result.stderr}`)
+    if (!result.stdout.includes('Plan digest: sha256:')) throw new Error('no plan digest')
+    if (readFileSync(path.join(target, '.wrkrs', 'manifest.json'), 'utf8') !== before) {
+      throw new Error('dry run changed the manifest')
+    }
+  })
+  step('wrkrs update --yes applies a configuration edit', () => {
+    const configPath = path.join(target, '.wrkrs', 'config.yaml')
+    const config = readFileSync(configPath, 'utf8')
+    if (!config.includes('        - typescript\n')) throw new Error('unexpected config shape')
+    writeFileSync(
+      configPath,
+      config.replace('        - typescript\n', '        - typescript\n        - rust\n'),
+    )
+    const result = runCli(bin, ['update', '--yes'], target)
+    if (result.code !== 0) throw new Error(`exit ${result.code}: ${result.stderr}`)
+    const agent = readFileSync(
+      path.join(target, '.claude', 'agents', 'wrkrs-software-engineer.md'),
+      'utf8',
+    )
+    if (!agent.includes('rust')) throw new Error('the projection was not updated')
+    const check = runCli(bin, ['check'], target)
+    if (check.code !== 0) throw new Error(`check failed after update: ${check.stdout}`)
+  })
+  step('wrkrs uninstall --dry-run', () => {
+    const result = runCli(bin, ['uninstall', '--dry-run'], target)
+    if (result.code !== 0) throw new Error(`exit ${result.code}: ${result.stderr}`)
+    if (!existsSync(path.join(target, '.wrkrs', 'manifest.json'))) {
+      throw new Error('dry run removed the manifest')
+    }
+  })
   step('npx wrkrs check --json from the consumer', () => {
     const output = run('npx', ['wrkrs', 'check', '--json', '--cwd', target], { cwd: consumer })
     const parsed = JSON.parse(output)
     if (parsed.ok !== true) throw new Error('check reported failure')
+  })
+  step('wrkrs uninstall --yes leaves nothing wrkrs installed', () => {
+    const result = runCli(bin, ['uninstall', '--yes'], target)
+    if (result.code !== 0) throw new Error(`exit ${result.code}: ${result.stderr}`)
+    for (const directory of ['.wrkrs', '.claude']) {
+      if (existsSync(path.join(target, directory))) throw new Error(`${directory} still exists`)
+    }
+    // The application files the fixture shipped are untouched.
+    for (const file of ['package.json', 'tsconfig.json', 'src/index.ts']) {
+      if (!existsSync(path.join(target, file))) throw new Error(`uninstall removed ${file}`)
+    }
   })
 } finally {
   rmSync(work, { recursive: true, force: true })

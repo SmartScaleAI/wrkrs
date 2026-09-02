@@ -31,12 +31,20 @@ export function createStyler(colors: boolean): Styler {
 
 const OUTCOME_ORDER: readonly PlanOutcome[] = [
   'create',
+  'replace',
+  'remove',
   'structural-merge',
   'reuse',
   'preserve',
   'no-op',
   'block',
 ]
+
+const COMMAND_TITLE: Record<InstallPlan['command'], string> = {
+  init: 'wrkrs init',
+  update: 'wrkrs update',
+  uninstall: 'wrkrs uninstall',
+}
 
 function severityLabel(
   style: Styler,
@@ -58,6 +66,9 @@ function outcomeLabel(style: Styler, outcome: PlanOutcome): string {
   switch (outcome) {
     case 'create':
       return style.green(text)
+    case 'replace':
+      return style.yellow(text)
+    case 'remove':
     case 'block':
       return style.red(text)
     case 'reuse':
@@ -80,7 +91,9 @@ function renderFindings(findings: readonly Finding[], style: Styler): string[] {
 export function renderPlan(plan: InstallPlan, style: Styler, options: { dryRun: boolean }): string {
   const lines: string[] = []
   lines.push(
-    style.bold(`wrkrs init${options.dryRun ? ' (dry run)' : ''} — wrkrs ${plan.wrkrsVersion}`),
+    style.bold(
+      `${COMMAND_TITLE[plan.command]}${options.dryRun ? ' (dry run)' : ''} — wrkrs ${plan.wrkrsVersion}`,
+    ),
   )
   lines.push(`Repository: ${plan.repositoryRoot}`)
   lines.push('')
@@ -89,9 +102,15 @@ export function renderPlan(plan: InstallPlan, style: Styler, options: { dryRun: 
   lines.push(...renderFindings(plan.findings, style))
   lines.push('')
 
-  lines.push(
-    style.bold(`Recommended roster (${plan.roster.presetId} v${plan.roster.presetVersion})`),
-  )
+  // An uninstall that runs after configuration is already gone has no roster
+  // to show; it plans from the manifest alone.
+  if (plan.roster.roles.length > 0) {
+    lines.push(
+      style.bold(
+        `${plan.command === 'init' ? 'Recommended roster' : 'Configured roster'} (${plan.roster.presetId} v${plan.roster.presetVersion})`,
+      ),
+    )
+  }
   for (const role of plan.roster.roles) {
     const marker = role.primary ? style.cyan('primary') : '       '
     lines.push(`  ${marker} ${role.id.padEnd(18)} ${style.dim(role.title)}`)
@@ -121,19 +140,42 @@ export function renderPlan(plan: InstallPlan, style: Styler, options: { dryRun: 
   if (plan.createdDirectories.length > 0) {
     lines.push(`  ${style.dim('directories to create: ' + plan.createdDirectories.join(', '))}`)
   }
+  if (plan.removedDirectories.length > 0) {
+    lines.push(`  ${style.dim('directories to remove: ' + plan.removedDirectories.join(', '))}`)
+  }
   lines.push('')
 
-  const creates = plan.operations.filter((operation) => operation.outcome === 'create')
-  lines.push(style.bold(`Diffs (${creates.length} new files)`))
-  for (const operation of creates) {
-    lines.push(
-      style.dim(`# ${operation.path} (${operation.proposedSize} bytes, ${operation.proposedHash})`),
-    )
+  const changes = plan.operations.filter(
+    (operation) =>
+      operation.outcome === 'create' ||
+      operation.outcome === 'replace' ||
+      operation.outcome === 'remove',
+  )
+  const counts = {
+    create: changes.filter((operation) => operation.outcome === 'create').length,
+    replace: changes.filter((operation) => operation.outcome === 'replace').length,
+    remove: changes.filter((operation) => operation.outcome === 'remove').length,
+  }
+  const summary = [
+    counts.create > 0 ? `${counts.create} new` : '',
+    counts.replace > 0 ? `${counts.replace} changed` : '',
+    counts.remove > 0 ? `${counts.remove} removed` : '',
+  ]
+    .filter((part) => part !== '')
+    .join(', ')
+  lines.push(style.bold(`Diffs (${summary === '' ? 'no file changes' : summary})`))
+  for (const operation of changes) {
+    const size =
+      operation.outcome === 'remove'
+        ? 'removed'
+        : `${operation.proposedSize} bytes, ${operation.proposedHash}`
+    lines.push(style.dim(`# ${operation.path} (${size})`))
     for (const line of (operation.diff ?? '').split('\n')) {
       if (line === '') continue
       if (line.startsWith('+++') || line.startsWith('---')) lines.push(style.bold(line))
       else if (line.startsWith('@@')) lines.push(style.cyan(line))
       else if (line.startsWith('+')) lines.push(style.green(line))
+      else if (line.startsWith('-')) lines.push(style.red(line))
       else lines.push(line)
     }
     lines.push('')
@@ -142,8 +184,14 @@ export function renderPlan(plan: InstallPlan, style: Styler, options: { dryRun: 
   lines.push(style.bold('Ownership'))
   const byManagement = new Map<string, string[]>()
   for (const operation of plan.operations) {
-    if (!operation.management || (operation.outcome !== 'create' && operation.outcome !== 'reuse'))
+    if (
+      !operation.management ||
+      (operation.outcome !== 'create' &&
+        operation.outcome !== 'replace' &&
+        operation.outcome !== 'reuse')
+    ) {
       continue
+    }
     byManagement.set(operation.management, [
       ...(byManagement.get(operation.management) ?? []),
       operation.path,
@@ -174,26 +222,57 @@ export function renderPlan(plan: InstallPlan, style: Styler, options: { dryRun: 
   return lines.join('\n') + '\n'
 }
 
-export function renderApplyResult(result: ApplyResult, style: Styler): string {
+const APPLIED_TITLE: Record<InstallPlan['command'], string> = {
+  init: 'Installed wrkrs',
+  update: 'Updated the wrkrs installation',
+  uninstall: 'Removed the wrkrs installation',
+}
+
+const NEXT_STEPS: Record<InstallPlan['command'], readonly string[]> = {
+  init: [
+    'Next: run `wrkrs check`, review the generated files, and invoke the `/wrkrs` skill from Claude Code with the outcome you want.',
+  ],
+  update: ['Next: run `wrkrs check` and review the changed files.'],
+  uninstall: ['Review the removal, then commit it when you are ready.'],
+}
+
+export function renderApplyResult(
+  result: ApplyResult,
+  style: Styler,
+  options: { command: InstallPlan['command']; verb?: string } = { command: 'init' },
+): string {
+  const command = options.command
   const lines: string[] = []
   switch (result.status) {
     case 'applied':
       lines.push(
-        style.green(style.bold('Installed wrkrs')) +
+        style.green(style.bold(APPLIED_TITLE[command])) +
           ` (transaction ${result.transactionId || 'none'})`,
       )
-      for (const path of result.appliedPaths) lines.push(`  created ${path}`)
+      for (const path of result.appliedPaths) {
+        lines.push(`  ${command === 'init' ? 'created' : 'wrote  '} ${path}`)
+      }
+      for (const path of result.removedPaths) lines.push(`  removed ${path}`)
+      for (const path of result.removedDirectories) lines.push(`  removed ${path}/`)
+      if (result.appliedPaths.length === 0 && result.removedPaths.length === 0) {
+        lines.push('  (no file changed)')
+      }
+      if (result.durability !== 'strict') {
+        lines.push(`  ${style.yellow('durability')} ${result.durability}`)
+      }
       for (const diagnostic of result.diagnostics.filter((item) => item.severity === 'warning')) {
         lines.push(`  ${style.yellow('warning')} ${diagnostic.code}: ${diagnostic.message}`)
       }
       lines.push('')
-      lines.push(
-        'Next: run `wrkrs check`, review the generated files, and invoke the `/wrkrs` skill from Claude Code with the outcome you want.',
-      )
+      lines.push(...NEXT_STEPS[command])
       lines.push('wrkrs did not commit anything; the working tree is yours to review.')
       break
     case 'aborted':
-      lines.push(style.red(style.bold('Installation aborted before any change was made')))
+      lines.push(
+        style.red(
+          style.bold(`${options.verb ?? 'Installation'} aborted before any change was made`),
+        ),
+      )
       for (const conflict of result.conflicts) {
         lines.push(
           `  ${style.red(conflict.code)}${conflict.path ? ` ${conflict.path}` : ''}: ${conflict.message}`,
@@ -203,24 +282,39 @@ export function renderApplyResult(result: ApplyResult, style: Styler): string {
       break
     case 'rolled-back':
       lines.push(
-        style.red(style.bold('Installation failed and was rolled back')) +
+        style.red(style.bold(`${options.verb ?? 'Installation'} failed and was rolled back`)) +
           ` (transaction ${result.transactionId})`,
       )
       lines.push(`  ${result.failure}`)
+      if (result.conflict) {
+        lines.push(
+          `  ${style.red(result.conflict.code)}${result.conflict.path ? ` ${result.conflict.path}` : ''}: ${result.conflict.message}`,
+        )
+        lines.push(`    ${style.dim(result.conflict.remediation)}`)
+      }
       for (const diagnostic of result.diagnostics.filter((item) => item.severity === 'error')) {
         lines.push(
           `  ${style.red('error')} ${diagnostic.code}${diagnostic.path ? ` ${diagnostic.path}` : ''}: ${diagnostic.message}`,
         )
       }
-      lines.push('  The repository was restored to its pre-install state.')
+      lines.push('  The repository was restored to the state it had before the command ran.')
       break
     case 'rollback-incomplete':
       lines.push(
-        style.red(style.bold('Installation failed and rollback could not remove every path')) +
-          ` (transaction ${result.transactionId})`,
+        style.red(
+          style.bold(
+            `${options.verb ?? 'Installation'} failed and rollback could not restore every path`,
+          ),
+        ) + ` (transaction ${result.transactionId})`,
       )
       lines.push(`  ${result.failure}`)
-      lines.push('  Retained paths (not deleted because they changed or could not be removed):')
+      if (result.conflict) {
+        lines.push(
+          `  ${style.red(result.conflict.code)}${result.conflict.path ? ` ${result.conflict.path}` : ''}: ${result.conflict.message}`,
+        )
+        lines.push(`    ${style.dim(result.conflict.remediation)}`)
+      }
+      lines.push('  Retained paths (left alone because they changed or could not be reconciled):')
       for (const item of result.retained) lines.push(`    ${item.path}: ${item.reason}`)
       lines.push(
         `  Recovery: review the paths above, restore or remove them, then delete ${result.journalPath}.`,

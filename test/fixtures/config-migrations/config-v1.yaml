@@ -1,0 +1,24 @@
+# wrkrs repository configuration (schema version 1).
+# owner-header-comment
+
+schemaVersion: 1
+preset:
+  id: product-engineering
+  version: 1
+runtime:
+  primary: claude-code
+# roster-comment
+roster:
+  primaryRole: product-manager
+  roles:
+    - id: product-manager
+      source: .wrkrs/roles/product-manager.md
+
+governance:
+  requirePlanApproval: true
+  requireDesignApproval: true
+  requireOwnerTestForUserFacingOrNativeWork: true
+  requireExplicitReleaseApproval: true
+providers: {}
+extensions:
+  ownerNote: keep-me

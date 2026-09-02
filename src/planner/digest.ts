@@ -31,6 +31,7 @@ export function computePlanDigest(plan: Omit<InstallPlan, 'digest'>): string {
     operations: plan.operations.map(semanticOperation),
     blockers: plan.blockers,
     createdDirectories: plan.createdDirectories,
+    removedDirectories: plan.removedDirectories,
   })
 }
 

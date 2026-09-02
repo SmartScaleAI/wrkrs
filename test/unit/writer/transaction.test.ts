@@ -90,24 +90,34 @@ describe('transactional apply', () => {
     expect(existsSync(path.join(root, '.wrkrs'))).toBe(false)
   })
 
-  it('refuses to run when another installation holds the lock', async () => {
+  it('refuses to run when another installation holds the lock and never removes that lock', async () => {
     const root = repo()
     const inner = createTestPorts().fs
     const fs = interceptFileSystem(inner, {
-      writeFileExclusive: async (args, next) => {
-        if (args[0].endsWith('.lock')) {
-          await next(args[0], new TextEncoder().encode('{"transactionId":"competitor"}\n'), 0o644)
-        }
-        return next(...args)
+      bound: {
+        writeFileExclusive: async (args, next) => {
+          if (args[0] === '.lock') {
+            await next('.lock', new TextEncoder().encode('{"transactionId":"competitor"}\n'), 0o600)
+          }
+          return next(...args)
+        },
       },
     })
     const ports = createTestPorts({ fs })
     const prepared = await prepare(root, ports)
     const result = await applyPreparedInit(prepared, createTestDependencies(), ports)
-    expect(result.status).toBe('aborted')
-    if (result.status === 'aborted') {
-      expect(result.conflicts.map((conflict) => conflict.code)).toEqual(['OWNERSHIP_LOCK_PRESENT'])
+    // The competitor's lock sits inside the .wrkrs directory this transaction
+    // created, so that directory cannot be removed: the honest result names it
+    // instead of claiming a clean abort, and the foreign lock is untouched.
+    expect(result.status).toBe('rollback-incomplete')
+    if (result.status === 'rollback-incomplete') {
+      expect(result.conflict?.code).toBe('OWNERSHIP_LOCK_PRESENT')
+      expect(result.retained.map((item) => item.path)).toEqual(['.wrkrs'])
     }
+    expect(readFileSync(path.join(root, '.wrkrs', '.lock'), 'utf8')).toBe(
+      '{"transactionId":"competitor"}\n',
+    )
+    expect(readTree(root).find((entry) => entry.path === '.wrkrs/.lock')?.mode).toBe(0o600)
     expect(
       readTree(root)
         .map((entry) => entry.path)
@@ -134,12 +144,14 @@ describe('transactional apply', () => {
     const before = hashTree(root)
     let writes = 0
     const fs = interceptFileSystem(createTestPorts().fs, {
-      writeFileExclusive: async (args, next) => {
-        if (args[0].includes('wrkrs-qa-engineer')) {
-          throw new Error('injected disk failure')
-        }
-        writes += 1
-        return next(...args)
+      bound: {
+        writeFileExclusive: async (args, next) => {
+          if (args[0].includes('wrkrs-qa-engineer')) {
+            throw new Error('injected disk failure')
+          }
+          writes += 1
+          return next(...args)
+        },
       },
     })
     const ports = createTestPorts({ fs })
@@ -157,18 +169,37 @@ describe('transactional apply', () => {
     const root = repo()
     const before = hashTree(root)
     const fs = interceptFileSystem(createTestPorts().fs, {
-      rename: async (args, next) => {
-        await next(...args)
-        if (args[1].endsWith('schema.json')) appendFileSync(args[1], '/* corrupted */')
+      bound: {
+        linkExclusive: async (args, next, directory) => {
+          await next(...args)
+          if (args[1] === 'schema.json') {
+            appendFileSync(
+              path.join(root, ...directory.relativePath.split('/'), args[1]),
+              '/* corrupted */',
+            )
+          }
+        },
       },
     })
     const ports = createTestPorts({ fs })
     const prepared = await prepare(root, ports)
     const result = await applyPreparedInit(prepared, createTestDependencies(), ports)
-    expect(result.status).toBe('rolled-back')
-    if (result.status === 'rolled-back')
-      expect(result.failure).toContain('Post-write verification failed')
-    expect(hashTree(root)).toBe(before)
+    // The published bytes no longer match what wrkrs wrote, which is
+    // indistinguishable from an external edit: the file must be retained and
+    // reported, and everything else reverted.
+    expect(result.status).toBe('rollback-incomplete')
+    if (result.status !== 'rollback-incomplete') return
+    expect(result.failure).toContain('Post-write verification failed')
+    expect(result.retained.map((item) => item.path)).toContain('.wrkrs/schema.json')
+    expect(readFileSync(path.join(root, '.wrkrs', 'schema.json'), 'utf8')).toContain(
+      '/* corrupted */',
+    )
+    const remaining = readTree(root)
+      .filter((entry) => entry.kind === 'file')
+      .map((entry) => entry.path)
+      .filter((entry) => entry.startsWith('.wrkrs') || entry.startsWith('.claude'))
+    expect(remaining).toEqual(['.wrkrs/.journal.json', '.wrkrs/schema.json'])
+    expect(before).not.toBe(hashTree(root))
   })
 
   it('rolls back when post-apply validation reports an error', async () => {
@@ -199,12 +230,14 @@ describe('transactional apply', () => {
     const root = repo()
     const edited = path.join(root, '.claude', 'agents', 'wrkrs-product-designer.md')
     const fs = interceptFileSystem(createTestPorts().fs, {
-      writeFileExclusive: async (args, next) => {
-        if (args[0].includes('wrkrs-qa-engineer')) {
-          appendFileSync(edited, '\nExternal edit made while wrkrs was running.\n')
-          throw new Error('injected failure after external edit')
-        }
-        return next(...args)
+      bound: {
+        writeFileExclusive: async (args, next) => {
+          if (args[0].includes('wrkrs-qa-engineer')) {
+            appendFileSync(edited, '\nExternal edit made while wrkrs was running.\n')
+            throw new Error('injected failure after external edit')
+          }
+          return next(...args)
+        },
       },
     })
     const ports = createTestPorts({ fs })

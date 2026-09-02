@@ -15,7 +15,7 @@ import type { OwnershipManifest } from '../../../src/core/ownership.js'
 import { REPOSITORY_ROOT } from '../../helpers/temp.js'
 
 const validConfig: WrkrsConfig = {
-  schemaVersion: 1,
+  schemaVersion: 3,
   preset: { id: 'product-engineering', version: 1 },
   runtime: { primary: 'claude-code' },
   roster: {
@@ -35,7 +35,8 @@ const validConfig: WrkrsConfig = {
     requireOwnerTestForUserFacingOrNativeWork: true,
     requireExplicitReleaseApproval: true,
   },
-  providers: {},
+  execution: { profile: 'adaptive' },
+  connections: {},
   extensions: {},
 }
 
@@ -48,13 +49,12 @@ describe('JSON schema', () => {
     expect(renderConfigJsonSchema()).toBe(committed)
   })
 
-  it('is strict at the root and open only for providers and extensions', () => {
+  it('is strict at the root and open only for extensions', () => {
     const schema = JSON.parse(renderConfigJsonSchema()) as {
       additionalProperties: boolean
       properties: Record<string, { additionalProperties?: unknown }>
     }
     expect(schema.additionalProperties).toBe(false)
-    expect(schema.properties['providers']?.additionalProperties).toEqual({})
     expect(schema.properties['extensions']?.additionalProperties).toEqual({})
   })
 })
@@ -65,7 +65,10 @@ describe('config loading', () => {
     expect(text.endsWith('\n')).toBe(true)
     expect(text.startsWith('# wrkrs repository configuration')).toBe(true)
     const parsed = parseConfigDocument(text)
-    expect(parsed).toEqual({ ok: true, value: validConfig })
+    expect(parsed).toEqual({
+      ok: true,
+      value: { config: validConfig, sourceSchemaVersion: 3, migrated: false },
+    })
   })
 
   it('identifies the schema version before validating', () => {
@@ -128,11 +131,41 @@ describe('config loading', () => {
     )
     expect(unsafeSource.ok).toBe(false)
   })
+
+  it('83: accepts adaptive, fast, standard, and full; rejects anything else; defaults via v1 migration', () => {
+    for (const profile of ['adaptive', 'fast', 'standard', 'full'] as const) {
+      const parsed = parseConfigDocument(
+        serializeConfig({ ...validConfig, execution: { profile } }),
+      )
+      expect(parsed.ok).toBe(true)
+      if (parsed.ok) expect(parsed.value.config.execution.profile).toBe(profile)
+    }
+    const rejected = parseConfigDocument(
+      serializeConfig(validConfig).replace('profile: adaptive', 'profile: turbo'),
+    )
+    expect(rejected.ok).toBe(false)
+    if (!rejected.ok) expect(rejected.error.code).toBe('CONFIG_INVALID')
+
+    const v1 = serializeConfig(validConfig)
+      .replace('schema version 3', 'schema version 1')
+      .replace('schemaVersion: 3', 'schemaVersion: 1')
+      .replace(/\nexecution:\n  profile: adaptive\n/, '\n')
+      .replace(/\nconnections: \{\}\n/, '\nproviders: {}\n')
+    const migrated = parseConfigDocument(v1)
+    expect(migrated.ok).toBe(true)
+    if (!migrated.ok) return
+    expect(migrated.value.sourceSchemaVersion).toBe(1)
+    expect(migrated.value.migrated).toBe(true)
+    expect(migrated.value.config.schemaVersion).toBe(3)
+    expect(migrated.value.config.execution.profile).toBe('adaptive')
+    expect(migrated.value.config.connections).toEqual({})
+  })
 })
 
 describe('manifest loading', () => {
   const manifest: OwnershipManifest = {
-    schemaVersion: 1,
+    schemaVersion: 2,
+    state: 'installed',
     installationId: '00000000-0000-4000-8000-000000000001',
     wrkrsVersion: '0.1.0',
     installedAt: '2026-08-29T12:00:00.000Z',
@@ -155,7 +188,29 @@ describe('manifest loading', () => {
   it('round-trips a serialized manifest', () => {
     const text = serializeManifest(manifest)
     expect(text.endsWith('}\n')).toBe(true)
-    expect(parseManifestDocument(text)).toEqual({ ok: true, value: manifest })
+    expect(parseManifestDocument(text)).toEqual({
+      ok: true,
+      value: { manifest, sourceSchemaVersion: 2, migrated: false },
+    })
+  })
+
+  it('migrates a version 1 manifest in memory and reports the version on disk', () => {
+    const { state: _state, schemaVersion: _version, ...body } = manifest
+    const parsed = parseManifestDocument(JSON.stringify({ schemaVersion: 1, ...body }))
+    expect(parsed.ok).toBe(true)
+    if (!parsed.ok) return
+    // Version 1 could only describe a complete installation, so the migration
+    // is total and the in-memory manifest is a full version 2 document.
+    expect(parsed.value.manifest).toEqual(manifest)
+    expect(parsed.value.sourceSchemaVersion).toBe(1)
+    expect(parsed.value.migrated).toBe(true)
+  })
+
+  it('rejects a version 1 manifest that carries a version 2 field', () => {
+    const { schemaVersion: _version, ...body } = manifest
+    const parsed = parseManifestDocument(JSON.stringify({ schemaVersion: 1, ...body }))
+    expect(parsed.ok).toBe(false)
+    if (!parsed.ok) expect(parsed.error.code).toBe('MANIFEST_INVALID')
   })
 
   it('rejects unsafe or duplicate entry paths and unsupported versions', () => {
@@ -197,7 +252,7 @@ describe('manifest loading', () => {
         true,
       )
 
-    const unsupported = parseManifestDocument(JSON.stringify({ ...manifest, schemaVersion: 2 }))
+    const unsupported = parseManifestDocument(JSON.stringify({ ...manifest, schemaVersion: 3 }))
     expect(unsupported.ok).toBe(false)
     if (!unsupported.ok) expect(unsupported.error.code).toBe('MANIFEST_SCHEMA_VERSION_UNSUPPORTED')
 
@@ -216,6 +271,7 @@ describe('manifest loading', () => {
         startedAt: '2026-08-29T12:00:00.000Z',
         updatedAt: '2026-08-29T12:00:00.000Z',
         status: 'applying',
+        durability: 'strict',
         operations: [],
         failure: null,
       }),

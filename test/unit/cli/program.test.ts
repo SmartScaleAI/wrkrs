@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { createNonInteractivePrompt } from '../../../src/cli/prompt.js'
 import { runCli } from '../../../src/cli/program.js'
 import type { PromptPort } from '../../../src/core/ports.js'
+import { createNodeInputDocument } from '../../../src/platform/input-document.js'
 import { ANSI_PATTERN } from '../../helpers/cli.js'
 import { createTestDependencies, createTestPorts } from '../../helpers/ports.js'
 import { createFixtureRepository, hashTree, removeDir } from '../../helpers/temp.js'
@@ -36,6 +37,7 @@ async function run(argv: string[], options: { prompt?: PromptPort; colors?: bool
       wrkrsVersion: deps.wrkrsVersion,
       ports: createTestPorts(),
       prompt: options.prompt ?? createNonInteractivePrompt(),
+      inputDocument: createNodeInputDocument(),
       preset: deps.preset,
       adapters: deps.adapters,
       providers: deps.providers,
@@ -77,7 +79,11 @@ describe('cli program', () => {
     cleanup.push(root)
     const before = hashTree(root)
     const decline = await run(['init', '--cwd', root], {
-      prompt: { interactive: true, confirm: async () => false },
+      prompt: {
+        interactive: true,
+        confirm: async () => false,
+        choose: async (_m, _c, defaultId) => defaultId,
+      },
     })
     expect(decline.code).toBe(0)
     expect(decline.stdout).toContain('Cancelled')
@@ -91,6 +97,7 @@ describe('cli program', () => {
           question = message
           return true
         },
+        choose: async (_m, _c, defaultId) => defaultId,
       },
     })
     expect(accept.code).toBe(0)

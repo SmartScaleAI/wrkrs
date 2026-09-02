@@ -14,6 +14,7 @@ import { ANSI_PATTERN, runCompiledCli } from '../helpers/cli.js'
 import { CLAUDE_MD_SENTINEL, SECRET_SENTINEL } from '../helpers/sentinels.js'
 import {
   createFixtureRepository,
+  FIXTURES_ROOT,
   hashTree,
   makeTempDir,
   readTree,
@@ -39,6 +40,16 @@ const GENERATED = [
   '.wrkrs/roles/software-engineer.md',
   '.wrkrs/schema.json',
 ]
+
+/** Adds a specialization so a lifecycle command has something to reconcile. */
+function editConfig(root: string): void {
+  const file = path.join(root, '.wrkrs', 'config.yaml')
+  const text = readFileSync(file, 'utf8')
+  writeFileSync(
+    file,
+    text.replace('        - typescript\n', '        - typescript\n        - rust\n'),
+  )
+}
 
 function fixture(name: 'clean-repository' | 'existing-claude-repository'): string {
   const root = createFixtureRepository(name, { commit: true })
@@ -182,10 +193,20 @@ describe('compiled CLI', () => {
     expect(entries).not.toContain('CLAUDE.md')
     expect(entries).not.toContain('.claude/settings.json')
     expect(entries).not.toContain('.mcp.json')
+    const mcpBefore = before.find((entry) => entry.path === '.mcp.json')
+    const mcpAfter = after.find((entry) => entry.path === '.mcp.json')
+    expect(mcpAfter).toEqual(mcpBefore)
 
     const check = await runCompiledCli(['check', '--json'], { cwd: root })
     expect(check.code).toBe(0)
     expect(check.stdout).not.toContain(SECRET_SENTINEL)
+
+    const updated = await runCompiledCli(['update', '--yes', '--json'], { cwd: root })
+    expect(updated.code).toBe(0)
+    expect(readTree(root).find((entry) => entry.path === '.mcp.json')).toEqual(mcpBefore)
+    const removed = await runCompiledCli(['uninstall', '--yes', '--json'], { cwd: root })
+    expect(removed.code).toBe(0)
+    expect(readTree(root).find((entry) => entry.path === '.mcp.json')).toEqual(mcpBefore)
   })
 
   it('blocks namespaced collisions and symlinks without writing', async () => {
@@ -231,6 +252,87 @@ describe('compiled CLI', () => {
     expect(hashTree(root)).toBe(before)
   })
 
+  it('46: refuses an unconfirmed non-interactive update or uninstall', async () => {
+    const root = fixture('clean-repository')
+    expect((await runCompiledCli(['init', '--yes'], { cwd: root })).code).toBe(0)
+    editConfig(root)
+    const before = hashTree(root)
+
+    const update = await runCompiledCli(['update'], { cwd: root })
+    expect(update.code).toBe(1)
+    expect(update.stderr).toContain('UPDATE_CONFIRMATION_REQUIRED')
+    expect(hashTree(root)).toBe(before)
+
+    const uninstall = await runCompiledCli(['uninstall'], { cwd: root })
+    expect(uninstall.code).toBe(1)
+    expect(uninstall.stderr).toContain('UNINSTALL_CONFIRMATION_REQUIRED')
+    expect(hashTree(root)).toBe(before)
+  })
+
+  it('47: update and uninstall dry runs change no byte and show exact diffs', async () => {
+    const root = fixture('clean-repository')
+    expect((await runCompiledCli(['init', '--yes'], { cwd: root })).code).toBe(0)
+    editConfig(root)
+    const before = hashTree(root)
+
+    const update = await runCompiledCli(['update', '--dry-run'], { cwd: root })
+    expect(update.code).toBe(0)
+    expect(update.stdout).toContain('wrkrs update (dry run)')
+    expect(update.stdout).toContain('--- a/.claude/agents/wrkrs-software-engineer.md')
+    expect(update.stdout).toContain('+++ b/.claude/agents/wrkrs-software-engineer.md')
+    expect(update.stdout).toContain('Dry run: nothing was written.')
+    expect(hashTree(root)).toBe(before)
+
+    const uninstall = await runCompiledCli(['uninstall', '--dry-run'], { cwd: root })
+    expect(uninstall.code).toBe(0)
+    expect(uninstall.stdout).toContain('wrkrs uninstall (dry run)')
+    // A removal is shown as a complete deletion against /dev/null.
+    expect(uninstall.stdout).toContain('+++ /dev/null')
+    expect(hashTree(root)).toBe(before)
+  })
+
+  it('45: update and uninstall refuse while a lock is present', async () => {
+    const root = fixture('clean-repository')
+    expect((await runCompiledCli(['init', '--yes'], { cwd: root })).code).toBe(0)
+    writeFileSync(path.join(root, '.wrkrs', '.lock'), '{}\n')
+    const before = hashTree(root)
+    for (const command of ['update', 'uninstall']) {
+      const run = await runCompiledCli([command, '--yes'], { cwd: root })
+      expect(run.code).toBe(1)
+      expect(run.stderr).toContain('OWNERSHIP_LOCK_PRESENT')
+    }
+    expect(hashTree(root)).toBe(before)
+  })
+
+  it('55: update --json emits a stable plan with no terminal styling', async () => {
+    const root = fixture('clean-repository')
+    expect((await runCompiledCli(['init', '--yes'], { cwd: root })).code).toBe(0)
+    editConfig(root)
+    const run = await runCompiledCli(['update', '--json', '--dry-run'], { cwd: root })
+    expect(run.code).toBe(0)
+    expect(ANSI_PATTERN.test(run.stdout)).toBe(false)
+    const payload = JSON.parse(run.stdout) as {
+      command: string
+      plan: { command: string; digest: string; removedDirectories: string[] }
+    }
+    expect(payload.command).toBe('update')
+    expect(payload.plan.command).toBe('update')
+    expect(payload.plan.digest.startsWith('sha256:')).toBe(true)
+    expect(payload.plan.removedDirectories).toEqual([])
+  })
+
+  it('a full lifecycle round trip restores the repository exactly', async () => {
+    const root = fixture('existing-claude-repository')
+    const before = readTree(root)
+    expect((await runCompiledCli(['init', '--yes'], { cwd: root })).code).toBe(0)
+    expect((await runCompiledCli(['update', '--yes'], { cwd: root })).code).toBe(0)
+    expect((await runCompiledCli(['uninstall', '--yes'], { cwd: root })).code).toBe(0)
+    expect(readTree(root)).toEqual(before)
+    // Nothing the fixture shipped, including its secret sentinel, was touched.
+    expect(readFileSync(path.join(root, '.mcp.json'), 'utf8')).toContain(SECRET_SENTINEL)
+    expect(readFileSync(path.join(root, 'CLAUDE.md'), 'utf8')).toContain(CLAUDE_MD_SENTINEL)
+  })
+
   it('detects deliberate drift after installation', async () => {
     const root = fixture('clean-repository')
     expect((await runCompiledCli(['init', '--yes'], { cwd: root })).code).toBe(0)
@@ -258,5 +360,78 @@ describe('compiled CLI', () => {
     const human = await runCompiledCli(['check'], { cwd: root })
     expect(human.stdout).toContain('MANAGED_FILE_DRIFT')
     expect(human.stdout).toContain('.claude/agents/wrkrs-software-engineer.md')
+  })
+  it('blocks a symlinked .claude and never prints content from outside the repository', async () => {
+    const root = fixture('clean-repository')
+    const outside = makeTempDir('wrkrs-outside-')
+    cleanup.push(outside)
+    mkdirSync(path.join(outside, 'agents'), { recursive: true })
+    writeFileSync(
+      path.join(outside, 'agents', 'wrkrs-product-manager.md'),
+      '---\nname: OUTSIDE_S3NT1N3L_7d2f\n---\nOUTSIDE_S3NT1N3L_7d2f\n',
+    )
+    writeFileSync(
+      path.join(outside, 'settings.json'),
+      '{"permissions": {"allow": ["OUTSIDE_S3NT1N3L_7d2f"]}}\n',
+    )
+    symlinkSync(outside, path.join(root, '.claude'))
+    const before = hashTree(root)
+
+    const json = await runCompiledCli(['init', '--dry-run', '--json'], { cwd: root })
+    expect(json.code).toBe(1)
+    const parsed = JSON.parse(json.stdout) as {
+      result: { status: string }
+      plan: { blockers: { code: string }[]; findings: { code: string }[] }
+    }
+    expect(parsed.result.status).toBe('blocked')
+    expect(parsed.plan.blockers.map((blocker) => blocker.code)).toContain('PATH_ANCESTOR_SYMLINK')
+    expect(parsed.plan.findings.map((finding) => finding.code)).toContain('SCAN_PATH_UNSAFE')
+    const human = await runCompiledCli(['init', '--dry-run'], { cwd: root })
+    const check = await runCompiledCli(['check', '--json'], { cwd: root })
+    for (const output of [
+      json.stdout,
+      json.stderr,
+      human.stdout,
+      human.stderr,
+      check.stdout,
+      check.stderr,
+    ]) {
+      expect(output).not.toContain('OUTSIDE_S3NT1N3L')
+      expect(output).not.toContain('OUTSIDE_S3')
+    }
+    expect(hashTree(root)).toBe(before)
+  })
+
+  it('never echoes malformed document content in check or init output', async () => {
+    const root = fixture('clean-repository')
+    mkdirSync(path.join(root, '.wrkrs'))
+    for (const [name, target] of [
+      ['config.yaml', 'config.yaml'],
+      ['manifest.json', 'manifest.json'],
+      ['journal.json', '.journal.json'],
+    ] as const) {
+      writeFileSync(
+        path.join(root, '.wrkrs', target),
+        readFileSync(path.join(FIXTURES_ROOT, 'malformed-documents', name)),
+      )
+    }
+    const outputs = [
+      await runCompiledCli(['check'], { cwd: root }),
+      await runCompiledCli(['check', '--json'], { cwd: root }),
+      await runCompiledCli(['init', '--dry-run'], { cwd: root }),
+      await runCompiledCli(['init', '--dry-run', '--json'], { cwd: root }),
+    ]
+    for (const output of outputs) {
+      expect(output.code).toBe(1)
+      expect(output.stdout + output.stderr).not.toContain('ZQX')
+    }
+    const check = JSON.parse(outputs[1]!.stdout) as { diagnostics: { code: string }[] }
+    expect(check.diagnostics.map((diagnostic) => diagnostic.code)).toEqual(
+      expect.arrayContaining([
+        'CONFIG_PARSE_ERROR',
+        'MANIFEST_PARSE_ERROR',
+        'TRANSACTION_JOURNAL_UNREADABLE',
+      ]),
+    )
   })
 })

@@ -7,7 +7,7 @@ import type {
   RosterRecommendation,
   Specialization,
 } from '../../core/roster.js'
-import { PRESET_ID, PRESET_VERSION } from '../../core/configuration.js'
+import { PRESET_ID, PRESET_VERSION, type Execution } from '../../core/configuration.js'
 import { ROLES_DIRECTORY } from '../../core/ownership.js'
 import type { CompiledRole } from '../../core/runtime-adapter.js'
 import { renderTemplate } from '../../core/template.js'
@@ -145,18 +145,29 @@ export function renderSpecializationSection(specializations: readonly Specializa
       const evidence = specialization.evidence
         .map((item) => `${item.path} (${item.detail})`)
         .join(', ')
-      return `- **${specialization.title}** (\`${specialization.id}\`) — evidence: ${evidence}`
+      // A specialization can be declared in configuration without a current
+      // signal in the repository. It is kept and named honestly rather than
+      // dropped or given invented evidence.
+      return evidence === ''
+        ? `- **${specialization.title}** (\`${specialization.id}\`) — declared in \`.wrkrs/config.yaml\`; no supporting signal detected in this repository`
+        : `- **${specialization.title}** (\`${specialization.id}\`) — evidence: ${evidence}`
     })
     .join('\n')
 }
 
 /** Renders every portable role definition for a recommendation. */
-export function compilePortableRoles(recommendation: RosterRecommendation): CompiledRole[] {
+export function compilePortableRoles(
+  recommendation: RosterRecommendation,
+  execution: Execution = { profile: 'adaptive' },
+): CompiledRole[] {
   return recommendation.roles.map((role) => {
     const template = loadRoleTemplate(role.id)
     const variables: Record<string, string> = {}
     if (role.id === 'software-engineer') {
       variables['specializations'] = renderSpecializationSection(role.specializations)
+    }
+    if (role.id === 'product-manager') {
+      variables['executionProfile'] = execution.profile
     }
     return {
       id: role.id,

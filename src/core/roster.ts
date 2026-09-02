@@ -9,6 +9,10 @@ export const ROLE_IDS = [
 
 export type RoleId = (typeof ROLE_IDS)[number]
 
+export function isRoleId(value: string): value is RoleId {
+  return (ROLE_IDS as readonly string[]).includes(value)
+}
+
 export interface RecommendationEvidence {
   readonly signal: string
   readonly path: string
@@ -33,7 +37,8 @@ export interface RecommendedRole {
 export interface RosterRecommendation {
   readonly presetId: 'product-engineering'
   readonly presetVersion: number
-  readonly primaryRoleId: 'product-manager'
+  /** The coordinating role; the preset chooses it and configuration may change it. */
+  readonly primaryRoleId: RoleId
   readonly roles: readonly RecommendedRole[]
   readonly evidence: readonly RecommendationEvidence[]
 }
@@ -56,7 +61,7 @@ export interface SpecializationRule {
 export interface RosterPreset {
   readonly id: 'product-engineering'
   readonly version: number
-  readonly primaryRoleId: 'product-manager'
+  readonly primaryRoleId: RoleId
   readonly roles: readonly PresetRole[]
   readonly specializationRules: readonly SpecializationRule[]
   roleSourcePath(roleId: RoleId): string

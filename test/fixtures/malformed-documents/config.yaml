@@ -1,0 +1,7 @@
+# Malformed on purpose: duplicate keys and an unterminated flow mapping, with
+# short sentinels placed where YAML parsers normally quote the offending text.
+schemaVersion: 1
+ZQX_CONF_A: 1
+ZQX_CONF_A: 2
+preset: { id: ZQX_CONF_B, version: 1
+roster: [ZQX_CONF_C

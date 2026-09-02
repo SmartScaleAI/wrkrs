@@ -1,22 +1,33 @@
 import { createDiagnostic, type Diagnostic } from '../../core/diagnostics.js'
 import { CONFIG_PATH, SCHEMA_PATH } from '../../core/ownership.js'
 import { sha256 } from '../../platform/hash.js'
-import { isWithinRoot, toSystemPath } from '../../platform/paths.js'
-import type { CheckContext } from '../context.js'
+import { containmentDiagnostic, type CheckContext } from '../context.js'
 
 const UPDATE_REMEDIATION =
-  'Restore the generated content from version control, or wait for the planned `wrkrs update` command to reconcile it'
+  'Restore the generated content from version control, or run `wrkrs update`, which preserves your change and reports it'
 
 export async function checkOwnership(context: CheckContext): Promise<Diagnostic[]> {
   const diagnostics: Diagnostic[] = []
   const manifest = context.manifest
   if (!manifest) return diagnostics
-  const realRoot = (await context.fs.realpath(context.root)) ?? context.root
   const ownedPaths = new Set(manifest.entries.map((entry) => entry.path))
 
   for (const entry of manifest.entries) {
-    const systemPath = toSystemPath(context.root, entry.path)
-    const stat = await context.fs.lstat(systemPath)
+    const resolved = await context.reader.resolve(entry.path)
+    if (!resolved.ok) {
+      diagnostics.push(
+        containmentDiagnostic(
+          resolved.error.code === 'PATH_ESCAPES_ROOT'
+            ? 'OWNED_PATH_ESCAPES_ROOT'
+            : 'OWNED_PATH_UNSAFE',
+          'error',
+          resolved.error,
+          { management: entry.management },
+        ),
+      )
+      continue
+    }
+    const stat = resolved.value.stat
     if (!stat) {
       diagnostics.push(
         createDiagnostic(
@@ -35,28 +46,13 @@ export async function checkOwnership(context: CheckContext): Promise<Diagnostic[
     if (stat.kind !== 'file') {
       diagnostics.push(
         createDiagnostic(
-          'OWNED_PATH_NOT_A_FILE',
+          stat.kind === 'symlink' ? 'OWNED_PATH_UNSAFE' : 'OWNED_PATH_NOT_A_FILE',
           'error',
-          `Owned path is a ${stat.kind}, not a regular file`,
+          `Owned path is a ${stat.kind}, not a regular file; wrkrs did not read it`,
           {
             path: entry.path,
             remediation: 'Replace the path with the regular file wrkrs installed',
             details: { management: entry.management, kind: stat.kind },
-          },
-        ),
-      )
-      continue
-    }
-    const real = await context.fs.realpath(systemPath)
-    if (real === null || !isWithinRoot(realRoot, real)) {
-      diagnostics.push(
-        createDiagnostic(
-          'OWNED_PATH_ESCAPES_ROOT',
-          'error',
-          'Owned path resolves outside the repository',
-          {
-            path: entry.path,
-            remediation: 'Remove the symlinked ancestor so the path stays inside the repository',
           },
         ),
       )
@@ -76,7 +72,16 @@ export async function checkOwnership(context: CheckContext): Promise<Diagnostic[
         ),
       )
     }
-    const hash = sha256(await context.fs.readFile(systemPath))
+    const bytes = await context.reader.readBytes(entry.path)
+    if (!bytes.ok) {
+      diagnostics.push(
+        containmentDiagnostic('OWNED_PATH_UNSAFE', 'error', bytes.error, {
+          management: entry.management,
+        }),
+      )
+      continue
+    }
+    const hash = sha256(bytes.value ?? new Uint8Array())
     if (hash === entry.lastAppliedHash) continue
     switch (entry.management) {
       case 'managed':
@@ -135,7 +140,9 @@ export async function checkOwnership(context: CheckContext): Promise<Diagnostic[
     }
   }
 
-  for (const path of [CONFIG_PATH, SCHEMA_PATH]) {
+  // A partial uninstall deliberately leaves the core files unowned; only a
+  // live installation is expected to own them.
+  for (const path of manifest.state === 'partial-uninstall' ? [] : [CONFIG_PATH, SCHEMA_PATH]) {
     if (!ownedPaths.has(path)) {
       diagnostics.push(
         createDiagnostic(
@@ -144,7 +151,7 @@ export async function checkOwnership(context: CheckContext): Promise<Diagnostic[
           'Core wrkrs file is not recorded in the manifest',
           {
             path,
-            remediation: 'A future `wrkrs update` can adopt it',
+            remediation: 'Run `wrkrs update` to adopt it',
           },
         ),
       )

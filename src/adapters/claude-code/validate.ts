@@ -1,7 +1,11 @@
 import { createDiagnostic, type Diagnostic } from '../../core/diagnostics.js'
 import { parseFrontmatter } from '../../core/frontmatter.js'
 import type { AdapterValidationContext } from '../../core/runtime-adapter.js'
-import { toSystemPath } from '../../platform/paths.js'
+import {
+  createRepositoryReader,
+  type ContainmentFailure,
+  type RepositoryReader,
+} from '../../platform/contained-path.js'
 import {
   AGENT_PREFIX,
   AGENTS_DIRECTORY,
@@ -14,16 +18,52 @@ import {
 const REMEDIATION_REINSTALL =
   'Restore the file from version control or remove the wrkrs installation and run `wrkrs init` again'
 
-async function readText(context: AdapterValidationContext, path: string): Promise<string | null> {
-  const systemPath = toSystemPath(context.root, path)
-  const stat = await context.fs.lstat(systemPath)
-  if (!stat || stat.kind !== 'file') return null
-  return new TextDecoder().decode(await context.fs.readFile(systemPath))
+function unsafe(failure: ContainmentFailure, extra: Record<string, string> = {}): Diagnostic {
+  return createDiagnostic(
+    'CLAUDE_PATH_UNSAFE',
+    'error',
+    `${failure.message}; wrkrs did not read it`,
+    {
+      path: failure.ancestor ?? failure.path,
+      remediation:
+        'Replace the symlinked or unsafe path with a real path inside the repository, or move it aside',
+      details: { reason: failure.code, requested: failure.path, ...extra },
+    },
+  )
+}
+
+type Read =
+  | { kind: 'absent' }
+  | { kind: 'unsafe'; diagnostic: Diagnostic }
+  | { kind: 'not-a-file'; fileKind: string }
+  | { kind: 'text'; text: string }
+
+async function readComponent(reader: RepositoryReader, path: string): Promise<Read> {
+  const resolved = await reader.resolve(path)
+  if (!resolved.ok) return { kind: 'unsafe', diagnostic: unsafe(resolved.error) }
+  const stat = resolved.value.stat
+  if (!stat) return { kind: 'absent' }
+  if (stat.kind === 'symlink') {
+    return {
+      kind: 'unsafe',
+      diagnostic: unsafe({
+        code: 'PATH_TARGET_SYMLINK',
+        path,
+        ancestor: null,
+        message: `"${path}" is a symlink`,
+      }),
+    }
+  }
+  if (stat.kind !== 'file') return { kind: 'not-a-file', fileKind: stat.kind }
+  const text = await reader.readText(path)
+  if (!text.ok) return { kind: 'unsafe', diagnostic: unsafe(text.error) }
+  return { kind: 'text', text: text.value ?? '' }
 }
 
 /**
  * Validates the generated Claude Code projections: presence, frontmatter,
- * names, skill wiring, and ownership. Read-only.
+ * names, skill wiring, and ownership. Read-only and contained: nothing is
+ * read through a symlinked `.claude`, agent, or skill path.
  */
 export async function validateClaudeCodeInstallation(
   context: AdapterValidationContext,
@@ -31,13 +71,18 @@ export async function validateClaudeCodeInstallation(
   const diagnostics: Diagnostic[] = []
   const config = context.config
   if (!config) return diagnostics
+  const reader = await createRepositoryReader(context.root, context.fs)
   const owned = new Set(context.manifest?.entries.map((entry) => entry.path) ?? [])
 
   for (const role of config.roster.roles) {
     const path = agentPath(role.id)
     const expectedName = agentName(role.id)
-    const stat = await context.fs.lstat(toSystemPath(context.root, path))
-    if (!stat) {
+    const read = await readComponent(reader, path)
+    if (read.kind === 'unsafe') {
+      diagnostics.push(read.diagnostic)
+      continue
+    }
+    if (read.kind === 'absent') {
       diagnostics.push(
         createDiagnostic('CLAUDE_AGENT_MISSING', 'error', `Claude agent projection is missing`, {
           path,
@@ -47,12 +92,12 @@ export async function validateClaudeCodeInstallation(
       )
       continue
     }
-    if (stat.kind !== 'file') {
+    if (read.kind === 'not-a-file') {
       diagnostics.push(
         createDiagnostic(
           'CLAUDE_AGENT_NOT_A_FILE',
           'error',
-          `Claude agent path is a ${stat.kind}`,
+          `Claude agent path is a ${read.fileKind}`,
           {
             path,
             remediation: 'Replace the path with the generated regular file',
@@ -61,8 +106,7 @@ export async function validateClaudeCodeInstallation(
       )
       continue
     }
-    const text = await readText(context, path)
-    const frontmatter = text === null ? null : parseFrontmatter(text)
+    const frontmatter = parseFrontmatter(read.text)
     if (!frontmatter) {
       diagnostics.push(
         createDiagnostic(
@@ -83,11 +127,11 @@ export async function validateClaudeCodeInstallation(
         createDiagnostic(
           'CLAUDE_AGENT_NAME_MISMATCH',
           'error',
-          `Claude agent name "${name}" does not match "${expectedName}"`,
+          `Claude agent name does not match "${expectedName}"`,
           {
             path,
             remediation: REMEDIATION_REINSTALL,
-            details: { expected: expectedName, actual: name },
+            details: { expected: expectedName },
           },
         ),
       )
@@ -121,20 +165,22 @@ export async function validateClaudeCodeInstallation(
     }
   }
 
-  const skillStat = await context.fs.lstat(toSystemPath(context.root, SKILL_PATH))
-  if (!skillStat) {
+  const skill = await readComponent(reader, SKILL_PATH)
+  if (skill.kind === 'unsafe') {
+    diagnostics.push(skill.diagnostic)
+  } else if (skill.kind === 'absent') {
     diagnostics.push(
       createDiagnostic('CLAUDE_SKILL_MISSING', 'error', 'The wrkrs project skill is missing', {
         path: SKILL_PATH,
         remediation: REMEDIATION_REINSTALL,
       }),
     )
-  } else if (skillStat.kind !== 'file') {
+  } else if (skill.kind === 'not-a-file') {
     diagnostics.push(
       createDiagnostic(
         'CLAUDE_SKILL_NOT_A_FILE',
         'error',
-        `The wrkrs skill path is a ${skillStat.kind}`,
+        `The wrkrs skill path is a ${skill.fileKind}`,
         {
           path: SKILL_PATH,
           remediation: 'Replace the path with the generated regular file',
@@ -142,8 +188,7 @@ export async function validateClaudeCodeInstallation(
       ),
     )
   } else {
-    const text = await readText(context, SKILL_PATH)
-    const frontmatter = text === null ? null : parseFrontmatter(text)
+    const frontmatter = parseFrontmatter(skill.text)
     const expectedAgent = agentName(config.roster.primaryRole)
     const expectations: ReadonlyArray<readonly [string, string]> = [
       ['name', SKILL_NAME],
@@ -171,11 +216,11 @@ export async function validateClaudeCodeInstallation(
             createDiagnostic(
               'CLAUDE_SKILL_FRONTMATTER_INVALID',
               'error',
-              `The wrkrs skill field "${field}" is "${actual}" but should be "${expected}"`,
+              `The wrkrs skill field "${field}" should be "${expected}"`,
               {
                 path: SKILL_PATH,
                 remediation: REMEDIATION_REINSTALL,
-                details: { field, expected, actual },
+                details: { field, expected },
               },
             ),
           )
@@ -212,11 +257,12 @@ export async function validateClaudeCodeInstallation(
     }
   }
 
-  const agentsDirectory = toSystemPath(context.root, AGENTS_DIRECTORY)
-  const agentsStat = await context.fs.lstat(agentsDirectory)
-  if (agentsStat?.kind === 'directory') {
+  const listing = await reader.listDirectory(AGENTS_DIRECTORY)
+  if (!listing.ok) {
+    diagnostics.push(unsafe(listing.error))
+  } else if (listing.value) {
     const expected = new Set(config.roster.roles.map((role) => `${agentName(role.id)}.md`))
-    for (const entry of await context.fs.readDirectory(agentsDirectory)) {
+    for (const entry of listing.value) {
       if (!entry.name.startsWith(AGENT_PREFIX) || expected.has(entry.name)) continue
       diagnostics.push(
         createDiagnostic(
