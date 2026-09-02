@@ -6,14 +6,22 @@ import type { OwnershipManifest, TransactionJournal } from '../core/ownership.js
 import { err, ok, type Result } from '../core/result.js'
 import { normalizeRelativePath } from '../platform/paths.js'
 import {
+  CURRENT_CONFIG_SCHEMA_VERSION,
   CURRENT_MANIFEST_SCHEMA_VERSION,
   isSupportedConfigSchemaVersion,
   isSupportedManifestSchemaVersion,
+  migrateConfigV1ToV2,
   migrateManifestV1ToV2,
   SUPPORTED_CONFIG_SCHEMA_VERSIONS,
   SUPPORTED_MANIFEST_SCHEMA_VERSIONS,
 } from './migrations/index.js'
-import { configSchemaV1, journalSchemaV1, manifestSchemaV1, manifestSchemaV2 } from './schema.js'
+import {
+  configSchemaV1,
+  configSchemaV2,
+  journalSchemaV1,
+  manifestSchemaV1,
+  manifestSchemaV2,
+} from './schema.js'
 
 /**
  * Document issues and errors carry only controlled text. Parser messages are
@@ -121,8 +129,19 @@ function identifySchemaVersion(
   return ok(raw)
 }
 
-/** Parses and validates .wrkrs/config.yaml text. */
-export function parseConfigDocument(text: string): Result<WrkrsConfig, DocumentError> {
+/**
+ * A configuration as this wrkrs version understands it, plus the version it
+ * was read from. Parsing migrates an older document in memory; it never writes.
+ */
+export interface ParsedConfig {
+  readonly config: WrkrsConfig
+  readonly sourceSchemaVersion: number
+  /** True when the document on disk is older than the current format. */
+  readonly migrated: boolean
+}
+
+/** Parses and validates .wrkrs/config.yaml text, migrating older versions in memory. */
+export function parseConfigDocument(text: string): Result<ParsedConfig, DocumentError> {
   const document = YAML.parseDocument(text, { uniqueKeys: true, strict: true })
   if (document.errors.length > 0) {
     return err({
@@ -151,25 +170,46 @@ export function parseConfigDocument(text: string): Result<WrkrsConfig, DocumentE
       issues: [],
     })
   }
-  const parsed = configSchemaV1.safeParse(value)
-  if (!parsed.success) {
-    return err({
-      code: 'CONFIG_INVALID',
-      message: 'config.yaml does not match the schema',
-      schemaVersion: version.value,
-      issues: zodIssues(parsed.error, 'CONFIG_SCHEMA_VIOLATION'),
-    })
+  const invalid = (issues: readonly DocumentIssue[], message: string): DocumentError => ({
+    code: 'CONFIG_INVALID',
+    message,
+    schemaVersion: version.value,
+    issues,
+  })
+
+  let config: WrkrsConfig
+  if (version.value === 1) {
+    const parsed = configSchemaV1.safeParse(value)
+    if (!parsed.success) {
+      return err(
+        invalid(
+          zodIssues(parsed.error, 'CONFIG_SCHEMA_VIOLATION'),
+          'config.yaml does not match the schema',
+        ),
+      )
+    }
+    config = migrateConfigV1ToV2(parsed.data)
+  } else {
+    const parsed = configSchemaV2.safeParse(value)
+    if (!parsed.success) {
+      return err(
+        invalid(
+          zodIssues(parsed.error, 'CONFIG_SCHEMA_VIOLATION'),
+          'config.yaml does not match the schema',
+        ),
+      )
+    }
+    config = parsed.data
   }
-  const semantic = validateConfigSemantics(parsed.data)
+  const semantic = validateConfigSemantics(config)
   if (semantic.length > 0) {
-    return err({
-      code: 'CONFIG_INVALID',
-      message: 'config.yaml contains inconsistent roster references',
-      schemaVersion: version.value,
-      issues: semantic,
-    })
+    return err(invalid(semantic, 'config.yaml contains inconsistent roster references'))
   }
-  return ok(parsed.data)
+  return ok({
+    config,
+    sourceSchemaVersion: version.value,
+    migrated: version.value !== CURRENT_CONFIG_SCHEMA_VERSION,
+  })
 }
 
 /**

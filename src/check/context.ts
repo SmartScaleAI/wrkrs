@@ -18,6 +18,8 @@ export interface CheckContext {
   /** Journal and lock belonging to this transaction are expected during post-apply validation. */
   readonly activeTransactionId: string | null
   config: WrkrsConfig | null
+  /** Schema version of the configuration as it exists on disk, before migration. */
+  configSchemaVersion: number | null
   manifest: OwnershipManifest | null
   /** Schema version of the manifest as it exists on disk, before migration. */
   manifestSchemaVersion: number | null

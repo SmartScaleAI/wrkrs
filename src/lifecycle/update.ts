@@ -1,4 +1,7 @@
 import { runCheck } from '../check/check.js'
+import { serializeConfig } from '../config/serialize.js'
+import { migrateConfigDocumentV1ToV2 } from '../config/migrations/index.js'
+import { CONFIG_SCHEMA_VERSION } from '../core/configuration.js'
 import { WrkrsError } from '../core/errors.js'
 import { createFinding, sortFindings, type Finding } from '../core/findings.js'
 import { CONFIG_PATH, MANIFEST_PATH } from '../core/ownership.js'
@@ -59,9 +62,27 @@ export async function prepareUpdate(
     )
   }
 
-  const roles = compilePortableRoles(roster.value)
+  const roles = compilePortableRoles(roster.value, config.execution)
+  let configYaml = serializeConfig(config)
+  let schemaMigration: true | undefined
+  if (
+    installation.configSourceSchemaVersion !== null &&
+    installation.configSourceSchemaVersion < CONFIG_SCHEMA_VERSION &&
+    installation.configSourceText !== null
+  ) {
+    const migrated = migrateConfigDocumentV1ToV2(installation.configSourceText)
+    if (!migrated.ok) {
+      return err(new WrkrsError(migrated.error.code, migrated.error.message))
+    }
+    configYaml = migrated.value
+    schemaMigration = true
+  }
   const desired: DesiredComponent[] = [
-    ...compileCoreComponents(config, roles),
+    ...compileCoreComponents(
+      config,
+      roles,
+      schemaMigration ? { configYaml, schemaMigration } : { configYaml },
+    ),
     ...adapter.compile({ roster: roster.value, config, roles }),
   ]
   for (const providerId of Object.keys(config.providers).sort()) {

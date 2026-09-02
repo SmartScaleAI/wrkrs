@@ -1,4 +1,5 @@
 import { parseConfigDocument } from '../../config/load.js'
+import { CONFIG_SCHEMA_VERSION } from '../../core/configuration.js'
 import { createDiagnostic, type Diagnostic } from '../../core/diagnostics.js'
 import { parseFrontmatter } from '../../core/frontmatter.js'
 import { CONFIG_PATH } from '../../core/ownership.js'
@@ -84,8 +85,25 @@ export async function checkConfig(context: CheckContext): Promise<Diagnostic[]> 
     }
     return diagnostics
   }
-  const config = parsed.value
+  const { config, sourceSchemaVersion, migrated } = parsed.value
   context.config = config
+  context.configSchemaVersion = sourceSchemaVersion
+
+  if (migrated) {
+    diagnostics.push(
+      createDiagnostic(
+        'CONFIG_MIGRATION_AVAILABLE',
+        'warning',
+        `Configuration is schema version ${sourceSchemaVersion}; this wrkrs version writes version ${CONFIG_SCHEMA_VERSION}`,
+        {
+          path: CONFIG_PATH,
+          remediation:
+            'Run `wrkrs update` to rewrite the configuration in the current format; check never migrates it',
+          details: { found: sourceSchemaVersion, current: CONFIG_SCHEMA_VERSION },
+        },
+      ),
+    )
+  }
 
   if (!context.adapters.get(config.runtime.primary)) {
     diagnostics.push(
@@ -207,7 +225,7 @@ export async function checkConfig(context: CheckContext): Promise<Diagnostic[]> 
       createDiagnostic(
         'CONFIG_OK',
         'info',
-        `Configuration is valid (schema version ${config.schemaVersion}, ${config.roster.roles.length} roles, primary ${config.roster.primaryRole})`,
+        `Configuration is valid (schema version ${sourceSchemaVersion}, ${config.roster.roles.length} roles, primary ${config.roster.primaryRole})`,
         {
           path: CONFIG_PATH,
         },

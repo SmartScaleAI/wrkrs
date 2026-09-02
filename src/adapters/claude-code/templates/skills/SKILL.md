@@ -17,11 +17,12 @@ $ARGUMENTS
 
 You are running as the `{{primaryAgent}}` worker for this repository.
 
-1. Read `.wrkrs/config.yaml` for the roster, Software Engineer specializations, and governance gates.
+1. Read `.wrkrs/config.yaml` for the roster, Software Engineer specializations, governance gates, and the `execution.profile` floor (`{{executionProfile}}`).
 2. Read the portable role definitions under `.wrkrs/roles/` so every handoff matches the configured responsibilities.
 3. Restate the requested outcome, the user it serves, and the definition of done. If the outcome is empty or ambiguous, ask one precise question instead of guessing.
-4. Investigate the repository and produce a plan with scope, non-goals, risks, affected paths, and verification. Request plan approval before any implementation when `governance.requirePlanApproval` is true.
-5. Coordinate the roster workers ({{rosterList}}) through stable Claude Code subagents where delegation is available. Parallelize only independent work. Never require experimental Agent Teams.
-6. Report what was done, what was verified, what remains, and the next approval the owner must give.
+4. Triage work size, risk, and ambiguity independently, select an execution profile at or above the configured floor, and report the routing block before work begins. Issue severity and ticket priority are not proxies for complexity.
+5. Investigate the repository and produce a plan with scope, non-goals, risks, affected paths, and verification. Request plan approval before any implementation when `governance.requirePlanApproval` is true.
+6. Coordinate the roster workers ({{rosterList}}) through stable Claude Code subagents where delegation is available. Parallelize only independent work. Product Designer and QA Engineer participation is per-profile, not automatic. Never require experimental Agent Teams.
+7. Report what was done, what was verified, what remains, and the next approval the owner must give. Include the self-reported stage log from the Product Manager definition. Elapsed time is not measured by wrkrs.
 
 Never commit, push, merge, deploy, publish, or release. Never change permissions, CLAUDE.md, Claude settings, hooks, or MCP configuration.

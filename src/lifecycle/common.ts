@@ -23,6 +23,10 @@ export interface LoadedInstallation {
    * manifest remains, and a retry must still be able to finish the job.
    */
   readonly config: WrkrsConfig | null
+  /** Original config.yaml bytes when the file was readable. */
+  readonly configSourceText: string | null
+  /** Schema version of config.yaml on disk, before in-memory migration. */
+  readonly configSourceSchemaVersion: number | null
   readonly manifest: OwnershipManifest
   /** True when the manifest on disk predates the current schema version. */
   readonly manifestMigrated: boolean
@@ -116,6 +120,8 @@ export async function loadInstallation(
   const reader = await createRepositoryReader(located.value.root, ports.fs)
   const configText = await reader.readText(CONFIG_PATH)
   let config: WrkrsConfig | null = null
+  let configSourceText: string | null = null
+  let configSourceSchemaVersion: number | null = null
   if (!configText.ok || configText.value === null) {
     if (options.requireConfig) {
       return err(
@@ -138,7 +144,9 @@ export async function loadInstallation(
         )
       }
     } else {
-      config = parsedConfig.value
+      config = parsedConfig.value.config
+      configSourceText = configText.value
+      configSourceSchemaVersion = parsedConfig.value.sourceSchemaVersion
     }
   }
 
@@ -146,6 +154,8 @@ export async function loadInstallation(
     repository: located.value,
     snapshot,
     config,
+    configSourceText,
+    configSourceSchemaVersion,
     manifest: state.manifest.manifest,
     manifestMigrated:
       state.manifest.sourceSchemaVersion !== null && state.manifest.sourceSchemaVersion < 2,

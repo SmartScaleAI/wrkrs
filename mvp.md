@@ -1,7 +1,7 @@
 # wrkrs MVP
 
-Status: Locked product scope; first vertical slice and second increment approved by the owner and implemented  
-Last updated: 2026-08-31
+Status: Locked product scope; first and second increments approved and implemented; third increment plan approved by the owner on 2026-09-01 (decisions.md A-024); Increment 3A implemented; Increment 3B implementation approved by the owner on 2026-09-02  
+Last updated: 2026-09-02
 
 ## Product statement
 
@@ -657,3 +657,477 @@ Implementation notes recorded during the increment:
 - An update adopts an edit to a seeded file that round-trips through the generator: when the file already holds exactly what wrkrs would write, that hash is recorded as last applied. Without this, editing `.wrkrs/config.yaml` — the intended workflow — would mark it customized forever and force every later uninstall to end partial.
 
 Deliberately deferred, unchanged from the approved scope: `--force` uninstall, field-specific merges for drifted managed files (decisions.md D-003), providers, and cross-platform CI. Verified on macOS with Node 22.23.2 and 24.18.1. Linux is unverified; Windows fails closed by design and is not supported until the cross-platform increment.
+
+## Third increment: adaptive execution and capability bindings
+
+Status: Plan approved by the owner on 2026-09-01 (decisions.md A-022, A-023, A-024). Increment 3A is implemented. Increment 3B implementation was approved by the owner on 2026-09-02.  
+Date proposed: 2026-09-01
+
+### Goal
+
+Make the installed team proportional to the task it is given, and let a worker reach the systems the repository already talks to — without wrkrs installing, authenticating, or brokering anything.
+
+### Strict boundaries
+
+This increment does not add: `.mcp.json` modification, provider account authentication, token storage, credential fields in configuration, arbitrary CLI execution, a broad provider catalog, dynamic third-party code loading, the `patched` ownership mode, a hosted service or UI, a marketplace, a proprietary runtime, new-application scaffolding, external ticket or design mutation, status synchronization, durable run state, automated resumption, a second project-management database, or any permanent frontend, backend, architecture, or data-science role.
+
+No new production dependency. `jsonc-parser` is not added: nothing here performs a shared strict-JSON edit. The owner's approval to adopt it stands for the increment that first does.
+
+### Capability vocabulary
+
+The vocabulary distinguishes reading context from mutating a remote system, because a binding may honestly supply one and not the other. Selecting Figma must never imply the configured server can create a design.
+
+| Capability | Kind | Meaning |
+| --- | --- | --- |
+| `source-control-context` | read | Branches, commits, diffs, and repository metadata beyond the local worktree |
+| `pull-request-context` | read | Pull or merge requests, their state, and review threads |
+| `pull-request-comment` | mutation | Adding a comment or review note to a pull request |
+| `work-item-context` | read | Tickets, issues, acceptance criteria, and status |
+| `work-item-update` | mutation | Changing a work item's fields or status |
+| `design-file-context` | read | Design files, frames, and specifications |
+| `design-comment-context` | read | Comments and feedback attached to a design |
+| `design-update` | mutation | Creating or changing a design artifact |
+
+The three mutation identifiers remain in the vocabulary so a binding can honestly say it supplies read context and not remote mutation. They are reserved and non-bindable in Increment 3: they must not be declared by a registered provider, offered during setup, projected into role or adapter files, or used as a `connections` key. The schema rejects a connection keyed by a reserved mutation capability with the stable diagnostic `CONNECTION_CAPABILITY_RESERVED`. Remote ticket, pull-request, and design mutation remain deferred.
+
+This replaces the placeholder vocabulary shipped with the first slice (`source-control`, `pull-requests`, `work-items`, `design-files`, `design-comments`, `tool-context`). No migration is required: no provider was ever registered and no capability identifier has ever been written to disk. `tool-context` is not carried forward; the generic existing-MCP binding names its capabilities explicitly instead of claiming a catch-all.
+
+`manual` is deliberately a binding kind rather than a capability. A capability describes what a worker needs; a binding describes how that need is met. Modelling "manual context" as a capability would mean a worker asks for manual-ness, which is never true — it asks for work items and is told a person will supply them.
+
+### Configuration shape
+
+Three shapes were considered.
+
+**A. Keyed by capability (recommended)**
+
+    connections:
+      source-control-context:
+        provider: github
+        kind: cli
+        executable: gh
+      work-item-context:
+        provider: linear
+        kind: mcp-server
+        server: linear
+        scope: project
+      design-file-context:
+        provider: manual
+        kind: manual
+        note: Ask the owner for the current Figma link
+
+One primary route per capability is a property of the file: a second route cannot be written, and YAML duplicate-key rejection (already enabled) makes a repeated capability a parse error rather than a semantic conflict wrkrs has to detect and rank. It reads as "who supplies this", which is the question setup asks.
+
+The value is a strict discriminated union on `kind`, defined in full in architecture.md. Because the key is the capability, a binding never carries a capability list — including the generic existing-MCP route, which is one entry per capability rather than one entry claiming several.
+
+The cost is repetition: a provider covering three capabilities is named three times, and renaming a server means editing each entry. For a roster this size that is a few lines.
+
+**B. Keyed by provider** — closest to the current `providers: {}` record.
+
+    providers:
+      linear:
+        kind: mcp-server
+        server: linear
+        capabilities: [work-item-context]
+
+One entry per tool and no repetition, but two providers can both claim `work-item-context`, so ambiguity becomes a validation error wrkrs must detect, explain, and rank — exactly the automatic fan-out or hidden failover the owner ruled out. Preventing it needs a second primary-route map, at which point the file carries the same information twice.
+
+**C. A list of bindings** — ordered entries, each naming a capability and a provider. Supports future failover, which is not wanted, makes duplicates easy to write, and is the worst of the three for targeted structural edits later.
+
+**Recommendation: shape A.** It makes the locked rule structural instead of enforced after the fact, and it is the shape the setup questions produce directly.
+
+The adaptive policy adds one more section:
+
+    execution:
+      profile: adaptive
+
+`adaptive` lets the Product Manager triage each request. Naming `fast`, `standard`, or `full` sets a floor the Product Manager may raise and must never lower.
+
+### Configuration migration
+
+Two explicit one-version-at-a-time migrations, matching the discipline A-004 fixed for configuration and A-021 first exercised for the ownership manifest. (An earlier draft of this section cited A-020, which is the bookkeeping removal ledger and unrelated.)
+
+- **schemaVersion 1 to 2** (Increment 3A): adds `execution`, defaulting `profile` to `adaptive`. Total and lossless.
+- **schemaVersion 2 to 3** (Increment 3B): replaces `providers` with `connections`. Every installation in existence carries `providers: {}` because no provider was ever registered, so the migration maps an empty record to an empty record. A non-empty `providers` map can only come from hand editing; it is a blocking diagnostic. Every key is accounted for. Diagnostics never print hostile keys raw: output uses bounded, escaped, length-capped renderings, and control characters, ANSI, newlines, and overlong values never reach human or JSON output raw. Nothing is silently dropped.
+
+`wrkrs check` reports an older configuration as migratable and never rewrites it; `wrkrs update` performs the migration, exactly as it already does for the ownership manifest.
+
+A configuration migration must preserve what the owner wrote. `.wrkrs/config.yaml` is seeded and hand-editable, and today `serializeConfig` rebuilds it from the parsed object with a fixed header, which would discard comments, key order, and any formatting the owner chose. A migration therefore applies a **minimal edit through the yaml Document API** — add the `execution` mapping, rename `providers` to `connections` — preserving comments, ordering, and untouched sections including `extensions`. A-004 already requires the Document API for exactly this; the first slice never needed it because it only ever created the file.
+
+This is a real implementation requirement, not a restatement: it changes how the migration path writes configuration, while the ordinary non-migrating update keeps the existing regenerate-and-compare behavior, including the A-021 rule that adopts an owner edit which round-trips through the generator.
+
+A non-empty legacy `providers` map can only come from hand editing. It blocks the migration, every key is accounted for, and no key is dropped, rewritten, or silently migrated into `connections`: wrkrs cannot know which capability a hand-written provider entry was meant to satisfy. Diagnostics use bounded, escaped, length-capped renderings of those keys. Control characters, ANSI, newlines, and overlong values never reach human or JSON output raw.
+
+The alternative — one combined bump to version 2 carrying both sections — is simpler to ship but couples two independent increments and leaves `connections: {}` inert in a released format. Two bumps are recommended.
+
+### Setup and non-interactive behavior
+
+Setup questions author configuration. They create no hidden state: everything an answer produces is visible in `.wrkrs/config.yaml` and in the plan before confirmation.
+
+Questions are asked only when stdin is a terminal and neither `--yes` nor `--json` is present. `--dry-run` does not suppress them: a dry run must show the plan the real run would produce, and it still writes nothing.
+
+| Invocation | Behavior |
+| --- | --- |
+| `wrkrs init` (terminal) | Asks the capability questions, shows the full mapping in the plan, then confirms |
+| `wrkrs init --dry-run` (terminal) | Asks, shows the same plan and mapping, writes nothing |
+| `wrkrs init --yes` | Asks nothing. Configures no binding. Reports each unbound capability and how to bind it |
+| `wrkrs init --json` | Asks nothing, same as `--yes`. Applying with `--json` still requires `--yes` |
+| Any non-terminal stdin | Asks nothing, same as `--yes` |
+| `wrkrs update` | Never asks. Bindings change by editing configuration and running update |
+
+No answer is ever guessed or defaulted to a vendor. The default for every question is "skip", which is also the deterministic non-interactive answer, so a non-interactive run is exactly an interactive run where every question was skipped.
+
+Each question offers only choices derived from the registered provider definitions and from what the scan actually verified — the exact MCP server names read from `.mcp.json` — plus the manual fallback and skip. There is no opaque "Other" free-text option. A connection wrkrs cannot see is reachable through the generic existing-MCP binding by naming the server on that capability's question, or through the manual fallback. Reserved mutation capabilities are never asked or offered.
+
+The canonical question set is one question per Increment 3 read capability. Question IDs are capability-derived. Human interactive setup and machine discovery emit the same set, in this order:
+
+1. What supplies `source-control-context`?
+2. What supplies `pull-request-context`?
+3. What supplies `work-item-context`?
+4. What supplies `design-file-context`?
+5. What supplies `design-comment-context`?
+
+Each choice encodes the full binding: provider, binding kind, scope, and server or executable identity. A follow-up "which server, and which capabilities" question is unnecessary because that information is already in the choice. A dedicated Linear choice and a generic MCP choice that reference the same server are distinct choices with distinct IDs.
+
+The complete capability-to-connection mapping appears in the plan, with its verification state, before any confirmation.
+
+Because `wrkrs update` never prompts, an installation created with `--yes` is bound by hand. The generated configuration carries commented guidance listing the available binding kinds and the server names the scan found, so the edit is a few lines with the candidates already in front of the owner. A later `wrkrs update --interactive` is the obvious extension and is deliberately not in this increment.
+
+### Machine-driven setup protocol
+
+A GUI, an agent, or any other non-human caller needs the same setup questions without a CLI process sitting idle while a person thinks. This increment adds the protocol, not a GUI and not a runtime adapter. Human terminal prompts are unchanged.
+
+Two distinct digests are required:
+
+- `questionSetDigest` identifies the canonical discovered questions and choices.
+- The plan digest identifies the exact semantic installation plan generated from accepted answers.
+
+The protocol is three separate invocations, none of which ever blocks:
+
+**1. Discover.** `wrkrs init --json --questions` emits the question set and `questionSetDigest`, prompts zero times, writes nothing, and exits.
+
+    {
+      "schemaVersion": 1,
+      "command": "init",
+      "mode": "questions",
+      "questionSetDigest": "sha256:...",
+      "questions": [
+        {
+          "id": "capability.work-item-context",
+          "capability": "work-item-context",
+          "prompt": "What supplies work items?",
+          "default": "skip",
+          "choices": [
+            { "id": "skip", "kind": "skip" },
+            { "id": "manual", "provider": "manual", "kind": "manual" },
+            {
+              "id": "provider:linear:kind:mcp-server:scope:project:server:linear",
+              "provider": "linear",
+              "kind": "mcp-server",
+              "server": "linear",
+              "scope": "project",
+              "verification": "verified-project"
+            },
+            {
+              "id": "provider:mcp:kind:mcp-server:scope:project:server:linear",
+              "provider": "mcp",
+              "kind": "mcp-server",
+              "server": "linear",
+              "scope": "project",
+              "verification": "verified-project"
+            }
+          ]
+        }
+      ]
+    }
+
+Question identifiers are stable and capability-derived, not ordinal, so a caller can answer them in any order and across wrkrs versions. Choice identifiers are deterministic and unique across provider, binding kind, scope, and server or executable identity. A dedicated Linear choice and a generic MCP choice referencing the same server never share an ID. Every choice comes from the registered providers and from server names the scan verified; there is no free-text choice; a server name that failed identifier validation is not offered; reserved mutation capabilities are not offered at all.
+
+**2. Answer and preview.** `wrkrs init --json --dry-run --answers <file>` reads a strict versioned document through the dedicated input-document port, recomputes and validates the question set, rejects a stale `questionSetDigest`, produces the semantic plan and plan digest, and exits. Nothing is written.
+
+    {
+      "schemaVersion": 1,
+      "questionSetDigest": "sha256:...",
+      "answers": {
+        "capability.work-item-context": "provider:linear:kind:mcp-server:scope:project:server:linear"
+      }
+    }
+
+Validation is strict: an unknown question id, an unknown choice id, a duplicate, a missing `schemaVersion`, a missing or stale `questionSetDigest`, or any unknown key is a stable error and no plan is produced. A stale `questionSetDigest` is `QUESTION_SET_DIGEST_MISMATCH`. An unanswered question is `skip`, which binds nothing — the same deterministic default as every other non-interactive path.
+
+**3. Apply against an approved plan digest.** `wrkrs init --json --yes --answers <file> --expect-digest <plan-digest>` recomputes the questions and the plan and applies only when both the answers document and the expected plan digest remain valid.
+
+A stale `questionSetDigest` is `QUESTION_SET_DIGEST_MISMATCH`, exit 1, nothing written. A plan-digest mismatch is `PLAN_DIGEST_MISMATCH`, exit 1, nothing written. `--expect-digest` names the plan digest from step 2, never `questionSetDigest`. `questionSetDigest` is compared across question discovery and later validation. The plan digest is compared only between preview and apply. Changing an answer changes the plan digest. Changing the available question choices changes `questionSetDigest`. `--expect-digest` is optional for a human at a terminal and is how a machine caller closes the loop.
+
+`--yes` without `--answers` is unchanged: no questions, no bindings, no guessed vendor. `--questions` and `--answers` never prompt regardless of whether stdin is a terminal.
+
+### Answers-document input
+
+The `--answers` file is an explicitly supplied input document, not repository content. It is not read through the hardened repository filesystem port. A dedicated input-document port owns this boundary:
+
+- Absolute paths and paths relative to the invocation working directory are allowed, including GUI-created temporary files outside the repository.
+- Open read-only. wrkrs never writes to the answers file.
+- The final path must be a regular file. Do not follow a final symlink.
+- Verify file identity with the opened handle against what lstat reported.
+- Enforce a conservative size limit of 64 KiB.
+- Require valid UTF-8 and strict JSON. Reject duplicate keys.
+- Never echo raw answer contents or parser-provided source excerpts.
+- Emit only controlled, sanitized diagnostics. Secret-shaped values and control characters in the file never reach human or JSON output raw.
+
+### Provider registry and portable contracts
+
+The canonical contract is `ProviderDefinition` in architecture.md, together
+with the binding schema, the provider-to-capability matrix, and the
+verification states defined beside it. It is defined once there and referenced
+here rather than restated, so the two documents cannot drift.
+
+What this increment adds around that contract:
+
+- an explicit registry map assembled by the composition root, with no dynamic loading
+- five registered providers: `github`, `linear`, `figma`, `mcp`, `manual`
+- a provider exists only when it can describe a capability it genuinely supplies; no placeholder is registered
+
+`planConfiguration` is removed from the contract rather than left unimplemented. Providers may return probes, diagnostics, validation results, and sanitized guidance. They never return a `DesiredComponent`, never access the writer, and never reach the transaction. The runtime adapter compiles provider guidance into files wrkrs already owns. The writer, the transaction, and the ownership modes are untouched.
+
+`probe` reads only the `RepositorySnapshot` the analyzer already produced and the PATH lookup the environment port already performs. No provider executes a command, opens a socket, or reads a credential.
+
+### Claude Code adapter compilation
+
+Bindings compile into the files wrkrs already owns and nowhere else:
+
+- Each agent projection gains a Connections section listing every bound capability, its provider, its binding kind, the exact server name where one applies, and its verification state.
+- The `/wrkrs` skill gains a one-line summary of what the team can and cannot reach.
+- A `declared-unverified` binding is labeled as such in the projection, so a worker never assumes the connection is present.
+- An unbound Increment 3 read capability is stated as unbound, with the manual fallback if one is configured. Reserved mutation capabilities are never listed as unbound, offered, or projected.
+
+The adapter never emits an MCP server definition, never writes an `mcpServers` block, never adds `allowed-tools` or any other permission, and never touches `.claude/settings.json`, hooks, `CLAUDE.md`, or `.mcp.json`. A server is referenced by name only.
+
+### check behavior for bindings
+
+| Code | Severity | When |
+| --- | --- | --- |
+| `CONNECTION_OK` | info | `verified-project`, `verified-environment`, or `manual` |
+| `CONNECTION_UNVERIFIED` | warning | `declared-unverified`: a user-, local-, or cloud-scoped server repository files cannot confirm |
+| `CONNECTION_SERVER_MISSING` | error | `absent` where the binding declared `scope: project` |
+| `CONNECTION_CLI_UNAVAILABLE` | warning | `absent` for a `cli` binding: the executable is not on PATH here |
+| `CONNECTION_PROVIDER_UNKNOWN` | error | Binding names a provider this wrkrs version does not register |
+| `CONNECTION_CAPABILITY_UNSUPPORTED` | error | Provider cannot supply the capability it is bound to, per the provider matrix |
+| `CONNECTION_CAPABILITY_RESERVED` | error | A `connections` key is a reserved mutation capability (`pull-request-comment`, `work-item-update`, or `design-update`) |
+| `CONNECTION_BINDING_INVALID` | error | The binding violates the discriminated schema: wrong kind fields, unknown key, or a capability list |
+| `CONNECTION_IDENTIFIER_REJECTED` | error | A server name, executable, or note failed identifier validation and was not compiled into any file |
+| `CONNECTION_CAPABILITY_UNBOUND` | info | An Increment 3 read capability has no binding |
+
+Reserved mutation capabilities are never reported as unbound. There is no ambiguity diagnostic: the capability-keyed shape cannot express two routes for one capability, and a repeated key is already a parse error.
+
+`CONNECTION_UNVERIFIED` and `CONNECTION_CLI_UNAVAILABLE` are warnings rather than errors because an environment-owned connection legitimately differs between a local machine and a Claude Code cloud session. `CONNECTION_SERVER_MISSING` is an error because `scope: project` asserts a fact about `.mcp.json` that wrkrs checked and found false. A `verified-environment` binding is reported as environment-scoped, never as a portable repository fact.
+
+Every diagnostic is sanitized the way the existing ones are: stable code, exact path, controlled message, no raw provider output, no network call, no execution. A rejected identifier is reported with a bounded, escaped, length-capped rendering of the offending value, never the raw bytes.
+
+### Update and uninstall
+
+Nothing new is required. Bindings live in `.wrkrs/config.yaml`, which is seeded and owner-editable; the projections that reference them are managed. Changing a binding is an ordinary `wrkrs update`: unchanged projections are replaced, drifted ones are preserved and reported, and the existing ownership rules apply unchanged. Uninstall removes only wrkrs-owned files. `.mcp.json` is never an operation target in any plan, which is what makes its preservation provable rather than promised.
+
+### Adaptive Product Manager routing
+
+Triage is bounded and evaluates three criteria independently. Severity and ticket priority are never used as a proxy.
+
+| Criterion | Question |
+| --- | --- |
+| Work size | How much code, how many systems, how much coordination? |
+| Risk | What happens if this is wrong, and how hard is it to roll back? |
+| Ambiguity | What product or technical decisions are still open? |
+
+Profiles:
+
+**Fast** — appropriate only when every condition holds: acceptance criteria are clear; the change is localized and reversible; no novel product or UX decision is required; nothing touches migration, production dependencies, permissions, authentication, security, billing, or an external integration; and focused verification can prove the result. Workflow: very short plan through the existing approval gate, no Product Designer unless a genuine product decision appears, one Software Engineer, focused engineering verification, no separate QA worker unless risk or unexpected behavior surfaces, and a Product Manager check against the acceptance criteria.
+
+**Standard** — moderate multi-file or multi-module work, contained regression risk, or reuse of existing patterns. Workflow: concise plan, optional design, one engineer by default, parallel engineering only for clearly independent work, QA validates affected behavior and the acceptance criteria.
+
+**Full** — required for major ambiguity or any high-risk trigger: new user-facing workflows; authentication, authorization, permissions, security, or billing; production data migrations; major architecture change; new production dependencies; multiple external systems; difficult rollback; or broad regression risk. Workflow: detailed approved plan, appropriate product and technical design, specialized engineer instances where useful, comprehensive QA and owner validation, and every existing release and external-action gate.
+
+Output contract, reported before work begins:
+
+    Execution profile: Fast
+    Planning: minimal
+    Product design: none
+    Technical design: none
+    Engineering: one worker
+    Verification: targeted
+    Reason: Localized, reversible change with clear acceptance criteria and no high-risk triggers.
+
+The owner may request a faster or more thorough workflow. The Product Manager may always escalate and never de-escalates below a floor the owner set. A speed request removes stages, never a gate: planning approval, security and permissions, secrets, billing, production dependencies, data migrations, external integrations, merges, deployments, publications, and releases stand in every profile.
+
+### What is enforceable and what is not
+
+| Behavior | Enforcement |
+| --- | --- |
+| Triage criteria, profile rules, high-risk triggers, and prohibitions are present in the role definitions and projections | Enforceable: template and snapshot tests |
+| `execution.profile` validates, defaults, rejects unknown values, and reaches the projections | Enforceable: schema and adapter tests |
+| Binding shape, provider identity, capability support, reserved mutation rejection, and verification state | Enforceable: schema, validator, and check tests |
+| `.mcp.json`, settings, hooks, and permissions are untouched | Enforceable: byte- and mode-identity assertions |
+| Repository-derived identifiers are validated, and a rejected one reaches no generated file | Enforceable: validator and hostile-fixture tests |
+| Migrations preserve comments, ordering, and owner edits | Enforceable: migration round-trip tests |
+| Machine-mode discovery with `questionSetDigest`, answer validation, plan-digest match, and zero prompts | Enforceable: protocol integration tests |
+| `--answers` file I/O: dedicated port, regular file, no final symlink, size limit, UTF-8, strict JSON, duplicate-key rejection, sanitized diagnostics, never written | Enforceable: input-document tests |
+| The stage-log block, its canonical vocabulary, retries as a separate metric, its self-reported label, and its not-measured line exist in the template | Enforceable: template tests |
+| The profile a worker actually selects for a given request | Prompt-guided only |
+| Whether a worker truly skips the designer, stays in scope, or reports honestly | Prompt-guided only |
+| Whether the stage log a worker fills in is accurate | Prompt-guided only |
+
+The CLI enforces everything above the divide. It cannot enforce anything below it, and nothing in the documentation, the diagnostics, or the tests may claim it does. A manual Claude Code evaluation is the only way to observe runtime routing, and it is named as a manual check rather than automated.
+
+### Workflow cost measurement
+
+The only evidence available is the owner's report that one apparently simple feature took roughly 37 minutes. The repository was searched for a corresponding transcript, report, timing record, or fixture: **none exists**. No timing breakdown is asserted here and no cause is claimed.
+
+Diagnosing that run would need a per-stage record with start and end timestamps and per-worker tool-call counts, distinguishing Product Manager investigation and planning, design, engineering, test execution, QA, retries, coordination, and final reporting.
+
+Three options, none free:
+
+1. **Self-reported stage log** — the Product Manager lists the stages it ran and what each produced, in its final report. Needs no runtime support and ships with the templates. It is model-reported, not measured, and must be labeled as such wherever it appears.
+2. **Session transcript analysis** — a later read-only command parses the runtime's own session transcripts. Genuinely measured, but depends on a transcript location and format wrkrs does not control, and is runtime-specific.
+3. **Runtime hooks emitting timestamps** — accurate and cheap to read, but wrkrs writing hooks contradicts the locked rule that it never changes settings or hooks, so it would need separate explicit approval.
+
+Decision for this increment: **option 1 ships in 3A**, with a bounded output block so it can be tested rather than merely described. Options 2 and 3 are deferred and named, not built.
+
+The stage log is compiled into the Product Manager definition as a fixed final block:
+
+    Stage log (self-reported by the Product Manager; not measured)
+      triage:           run
+      planning:         run
+      product design:   skipped - no user-facing decision
+      technical design: skipped - existing pattern reused
+      engineering:      run
+      verification:     run
+      qa:               skipped - profile Fast, no risk discovered
+      reporting:        run
+    Retries: 0
+    Elapsed time: not measured by wrkrs
+
+Canonical stages are triage, planning, product design, technical design, engineering, verification, QA, and reporting. Each appears exactly once as `run` or `skipped`; a skipped stage carries a short reason. `retries` is a separate numeric metric, not a workflow stage. The header states that it is self-reported. The elapsed-time line is fixed text: `Elapsed time: not measured by wrkrs`. wrkrs does not measure elapsed time and no worker may substitute an estimate for it. If a future increment obtains real per-stage timing from the runtime, that line becomes the only place it appears. No timing is invented and no cause is claimed for the previously reported thirty-seven-minute run.
+
+This is prompt-guided output. The enforceable half is that the template defines the block, the stage vocabulary, the self-reported label, the retries metric, and the not-measured line; whether a worker fills it in honestly is not something the CLI can verify.
+
+### First Increment 3 vertical slice
+
+Split into two sequenced slices, smallest first:
+
+**3A — adaptive execution refinement.** Role definitions and projections carry the triage, profiles, output contract, gates, prohibitions, and the bounded self-reported stage log using the canonical stage vocabulary, with `retries` as a separate numeric metric. Configuration schema version 2 adds `execution.profile`, with the first comment-preserving configuration migration. No new command, no provider work. This is the smaller and lower-risk half, it addresses the cost the owner actually reported, and it can ship alone.
+
+**3B — capability bindings.** Capability vocabulary with reserved non-bindable mutation identifiers; `connections` configuration at schema version 3 with the second migration; provider registry with GitHub, Linear, Figma, generic existing-MCP, and manual, each limited to Increment 3 read capabilities; read-only verification against `.mcp.json`; identifier validation for untrusted repository-derived values; human setup questions and the two-digest machine-driven setup protocol; safe answers-document input; adapter compilation of sanitized provider guidance; and check diagnostics.
+
+If either fallback proves too large for 3B, the schema direction is preserved and the exact deferral recorded; no placeholder provider is registered and no provider claims behavior it does not implement.
+
+### Third increment acceptance tests
+
+Type key: U unit, S template or snapshot, I integration, M manual Claude Code evaluation (not automated).
+
+Numbering continues from the second increment, which ended at 73. Increment 3 acceptance tests are contiguous from 74 through 143 with no duplicates or gaps: 74–105 existing Increment 3 tests, 106–109 stage log, 110–119 configuration migration, 120–127 untrusted identifiers, 128–139 machine protocol and safe answers input, 140–143 packaging and regression.
+
+#### Adaptive execution (3A)
+
+| # | Test | Type |
+| --- | --- | --- |
+| 74 | The Product Manager definition contains work size, risk, and ambiguity as three independently evaluated criteria, and states that severity and priority are not proxies for complexity | S |
+| 75 | Fast, Standard, and Full each carry explicit selection rules | S |
+| 76 | Every high-risk trigger appears in the mandatory-escalation list, and the Fast rules exclude every one of them | U |
+| 77 | Role definitions state that participation is per-profile, not automatic, for the Designer and the QA Engineer | S |
+| 78 | Technical design routes to a Software Engineer specialization; no new permanent role identifier appears in the preset or any projection | U |
+| 79 | The Fast profile's output block is present and bounded to the routing report | S |
+| 80 | Every profile requires verification evidence and a final acceptance check against the criteria | S |
+| 81 | The definitions state that the owner may raise rigor and that a speed request cannot bypass any mandatory gate | S |
+| 82 | The definitions prohibit unrelated refactoring, speculative improvement, unnecessary research, and unrequested documentation | S |
+| 83 | `execution.profile` accepts `adaptive`, `fast`, `standard`, and `full`, rejects anything else, defaults to `adaptive`, and appears in the compiled agent projections | U |
+| 84 | No generated content claims measured timing; any stage report is labeled self-reported, and unmeasured timing is reported as unavailable | U |
+| 85 | Runtime routing behaves per profile for a representative fast, standard, and full request | M |
+
+#### Capability bindings (3B)
+
+| # | Test | Type |
+| --- | --- | --- |
+| 86 | Every registered provider declares only Increment 3 read capabilities from the vocabulary, and declares no capability it cannot describe. Generic MCP and manual declare those same read capabilities, not every vocabulary entry. No registered provider declares a reserved mutation capability | U |
+| 87 | One capability cannot route to two providers: the shape forbids it and a duplicated capability key is a parse error | U |
+| 88 | An existing project MCP server name is mapped and referenced without changing `.mcp.json` | I |
+| 89 | `.mcp.json` is byte- and mode-identical after init, update, check, and uninstall in the existing-Claude fixture | I |
+| 90 | The schema defines no credential-bearing field: every binding shape is a closed discriminated union, and any unknown key — token-shaped or not — fails validation. wrkrs never requests, generates, or knowingly emits a credential; no prompt, template, or diagnostic asks for one | U |
+| 91 | A bound server name appears only in wrkrs-owned files; no generated file contains an MCP server definition, an `mcpServers` key, or a command or URL for a server; no other file changes | I |
+| 92 | The schema rejects a `connections` key that is a reserved mutation capability (`pull-request-comment`, `work-item-update`, `design-update`) with `CONNECTION_CAPABILITY_RESERVED`. Those identifiers are never offered in setup, declared by a registered provider, or compiled into a projection | U |
+| 93 | No permission is broadened: settings, hooks, and `CLAUDE.md` are untouched and no projection adds a tool grant | I |
+| 94 | A user-, local-, or cloud-scoped server is representable and reported `declared-unverified`; a `cli` found on PATH is reported `verified-environment` and never as a portable repository fact | U |
+| 95 | Missing, unknown-provider, and unsupported-capability bindings each produce a stable sanitized diagnostic with the exact path | U |
+| 96 | The manual fallback compiles instructions with no server reference | U |
+| 97 | A generic existing-MCP binding satisfies exactly the capability its map key names; a `capabilities` list inside any binding is a schema violation reported as `CONNECTION_BINDING_INVALID` | U |
+| 98 | Changing a binding replaces only the unchanged wrkrs-owned projections | U |
+| 99 | A customized seeded or drifted managed file follows the existing preserve-and-report rules when bindings change | U |
+| 100 | JSON plan and check output is deterministic and ANSI-free and carries no raw provider output | I |
+| 101 | `--yes`, `--json`, and a non-terminal stdin never prompt and configure no binding | I |
+| 102 | Setup offers only registered providers and server names verified from `.mcp.json`, plus manual and skip; there is no free-text option; reserved mutation capabilities are never offered | U |
+| 103 | No test requires a network account, a real credential, or provider execution | U |
+| 104 | `jsonc-parser` is absent from the dependency set | U |
+| 105 | The clean and existing-Claude fixtures remain preserved through every command | I |
+
+#### Workflow-cost stage log (3A)
+
+| # | Test | Type |
+| --- | --- | --- |
+| 106 | The Product Manager definition contains the stage-log block with every canonical stage exactly once: triage, planning, product design, technical design, engineering, verification, QA, and reporting. `retries` appears only as a separate numeric metric, not as a workflow stage | S |
+| 107 | The block is labeled self-reported and names the Product Manager as its source | S |
+| 108 | The elapsed-time line is exactly `Elapsed time: not measured by wrkrs`; no template, projection, or diagnostic contains a duration, a rate, an estimate, or a claimed cause for any reported workflow duration | U |
+| 109 | Each stage is marked `run` or `skipped`, and a skipped stage carries a short reason | S |
+
+#### Configuration migration (3A and 3B)
+
+| # | Test | Type |
+| --- | --- | --- |
+| 110 | A version 1 configuration migrates to version 2, adding `execution.profile: adaptive` and changing nothing else | U |
+| 111 | A version 2 configuration migrates to version 3, replacing an empty `providers` record with an empty `connections` map | U |
+| 112 | A version 1 configuration migrates to version 3 through both steps in order, never skipping a version | U |
+| 113 | `check` reports a version 1 and a version 2 configuration as migratable, names the command that migrates it, and rewrites no byte: the file hash and the whole-tree hash are unchanged | U, I |
+| 114 | A migration preserves owner comments, key order, blank lines, and `extensions` content exactly; only the migrated keys differ | U |
+| 115 | A migration preserves an owner edit elsewhere in the file, including a roster or governance change made by hand | U |
+| 116 | A non-empty legacy `providers` map blocks the migration. Every key is accounted for. Diagnostics use bounded, escaped, length-capped renderings. Nothing is dropped, rewritten, or migrated into `connections` | U |
+| 117 | A hostile legacy `providers` key containing control characters, ANSI, newlines, or an overlong value never reaches human or JSON output raw; the migration still blocks and every key is still accounted for | U |
+| 118 | `update --dry-run` on an unmigrated configuration shows the migration diff and writes nothing | I |
+| 119 | `update --yes` applies the migration and the resulting configuration passes `check` at the new version; a post-apply validation failure during a migrating update rolls back to the exact prior configuration bytes, comments and ordering included | U, I |
+
+#### Repository-derived identifiers are untrusted (3B)
+
+| # | Test | Type |
+| --- | --- | --- |
+| 120 | Provider identifiers, MCP server names, executable names, scope values, and notes each validate against a bounded character class and length | U |
+| 121 | A server name containing a control character, an ANSI escape sequence, a newline, or a carriage return is rejected and never compiled into any generated file | U |
+| 122 | A server name containing Markdown structural characters — backticks, fences, brackets, heading or list markers — cannot alter the structure of a generated projection | U, S |
+| 123 | A prompt-injection-shaped server name, for example one reading as an instruction to an agent, appears in no generated instruction text; the binding is rejected and reported instead | U, S |
+| 124 | A server name that would break YAML round-tripping is rejected rather than quoted into configuration | U |
+| 125 | A hostile `.mcp.json` fixture leaves human output free of escape sequences and JSON output free of ANSI and of raw bytes from the file | I |
+| 126 | A rejected identifier produces `CONNECTION_IDENTIFIER_REJECTED` naming the exact path, with the value rendered bounded, escaped, and length-capped | U |
+| 127 | An executable value containing a path separator, an argument, or shell metacharacters is rejected; wrkrs performs a PATH lookup only and executes nothing | U |
+
+#### Machine-driven setup protocol and safe answers input (3B)
+
+| # | Test | Type |
+| --- | --- | --- |
+| 128 | `init --json --questions` emits the question set and `questionSetDigest`, capability-derived question IDs, and deterministic choice IDs unique across provider, binding kind, scope, and server or executable identity; it offers only registered providers and verified server names plus manual and skip; it never offers a reserved mutation capability; it exits without prompting and writes nothing | I |
+| 129 | An answers document with an unknown question id, an unknown choice id, a duplicate answer, a missing `schemaVersion`, a missing `questionSetDigest`, or an unknown key is rejected with a stable sanitized error and produces no plan | U |
+| 130 | An unanswered question is treated as `skip` and binds nothing | U |
+| 131 | `init --json --dry-run --answers` recomputes and validates the question set, rejects a stale `questionSetDigest` with `QUESTION_SET_DIGEST_MISMATCH`, produces the semantic plan and plan digest, and writes nothing | I |
+| 132 | `questionSetDigest` is identical between `--questions` discovery and later validation of the same repository and provider set; changing the available question choices changes `questionSetDigest` | U |
+| 133 | `init --json --yes --answers --expect-digest` applies only when the answers document, including `questionSetDigest`, remains valid and the expected plan digest matches the recomputed plan | I |
+| 134 | A plan-digest mismatch produces `PLAN_DIGEST_MISMATCH`, exit 1, and no write | I |
+| 135 | The plan digest is compared only between preview and apply; changing an answer changes the plan digest; `questionSetDigest` is not used as the plan digest | U |
+| 136 | A dedicated Linear choice and a generic MCP choice referencing the same server have distinct choice IDs | U |
+| 137 | `--answers` accepts an absolute path and a path relative to the invocation working directory, including a regular file outside the repository; it uses the dedicated input-document port, not the repository filesystem port; the file is opened read-only and never written | I |
+| 138 | `--answers` rejects a final symlink, a non-regular file, a file over 64 KiB, malformed UTF-8, malformed JSON, and duplicate JSON keys, each with a stable sanitized diagnostic and no plan | U |
+| 139 | Every machine-mode invocation emits pure JSON with no ANSI and issues zero prompts, whether or not stdin is a terminal; diagnostics never echo raw answer contents, parser source excerpts, secret-shaped values, or control characters | I |
+
+#### Packaging and regression
+
+| # | Test | Type |
+| --- | --- | --- |
+| 140 | Acceptance tests 1 through 73 continue to pass | U, I |
+| 141 | The packed tarball still carries exactly the required assets and the single `wrkrs` bin; a provider template ships only when a provider actually has one | I |
+| 142 | No registered provider claims behavior it does not implement | U |
+| 143 | The documented Node engine floor and platform support are unchanged | U |
+
+### Third increment deferrals
+
+Recorded deliberately, with no placeholder behavior standing in for any of them: `.mcp.json` writes and the `patched` ownership mode; `jsonc-parser`; provider account authentication and token storage; a `wrkrs provider` command; `wrkrs update --interactive` and the machine protocol on `update`, which lands on `init` only; a GUI or any runtime adapter that consumes the machine protocol; a broad provider catalog including Jira as a dedicated provider; mutation capabilities being exercised by any behavior; external ticket, status, and design mutation; durable task context storage and synchronization (D-007, D-008); live orchestration and automated resumption (D-008); additional runtime adapters including Cursor (D-009); hosted state of any kind; measured per-stage timing through transcripts or hooks; and cross-platform CI, which remains Increment 4.

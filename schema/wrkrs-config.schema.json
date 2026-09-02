@@ -1,11 +1,11 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "wrkrs configuration (schema version 1)",
+  "title": "wrkrs configuration (schema version 2)",
   "type": "object",
   "properties": {
     "schemaVersion": {
       "type": "number",
-      "const": 1,
+      "const": 2,
       "description": "Configuration schema version."
     },
     "preset": {
@@ -131,6 +131,25 @@
       },
       "additionalProperties": {},
       "description": "Explicit extension data preserved by wrkrs but not interpreted by it."
+    },
+    "execution": {
+      "type": "object",
+      "properties": {
+        "profile": {
+          "type": "string",
+          "enum": [
+            "adaptive",
+            "fast",
+            "standard",
+            "full"
+          ],
+          "description": "Execution profile floor: adaptive lets the Product Manager triage; fast, standard, and full set a floor that may be raised and never lowered."
+        }
+      },
+      "required": [
+        "profile"
+      ],
+      "additionalProperties": false
     }
   },
   "required": [
@@ -140,7 +159,8 @@
     "roster",
     "governance",
     "providers",
-    "extensions"
+    "extensions",
+    "execution"
   ],
   "additionalProperties": false,
   "description": "wrkrs repository configuration"

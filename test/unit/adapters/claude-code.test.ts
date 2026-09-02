@@ -68,6 +68,11 @@ describe('Claude Code adapter compile', () => {
     expect(fields.get('disable-model-invocation')).toBe('true')
     expect(fields.get('argument-hint')).toBe('<requested outcome>')
     expect(skill.content).toContain('$ARGUMENTS')
+    expect(skill.content).toContain('execution.profile')
+    const pm = components.find((component) => component.path.endsWith('wrkrs-product-manager.md'))!
+    expect(pm.content).toContain('Execution profile floor from `.wrkrs/config.yaml`: `adaptive`')
+    expect(pm.content).toContain('Work size')
+    expect(pm.content).toContain('Elapsed time: not measured by wrkrs')
   })
 
   it('renders role templates with frontmatter ids and no unresolved placeholders', () => {

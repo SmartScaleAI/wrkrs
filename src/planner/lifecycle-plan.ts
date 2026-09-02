@@ -209,6 +209,10 @@ function classifyDesiredForUpdate(
     return passiveOperation({ ...source, reason: 'Already current' }, 'no-op', file)
   }
 
+  if (component.schemaMigration) {
+    return replaceOperation(source, file, contents.get(component.path) ?? '', component.content)
+  }
+
   if (file.hash !== entry.lastAppliedHash) {
     return passiveOperation(
       {

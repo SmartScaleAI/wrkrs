@@ -93,6 +93,7 @@ export function buildConfig(roster: RosterRecommendation): WrkrsConfig {
       requireOwnerTestForUserFacingOrNativeWork: true,
       requireExplicitReleaseApproval: true,
     },
+    execution: { profile: 'adaptive' },
     providers: {},
     extensions: {},
   }
@@ -102,16 +103,20 @@ export function buildConfig(roster: RosterRecommendation): WrkrsConfig {
 export function compileCoreComponents(
   config: WrkrsConfig,
   roles: readonly CompiledRole[],
+  options: { readonly configYaml?: string; readonly schemaMigration?: true } = {},
 ): DesiredComponent[] {
   return [
     {
       path: CONFIG_PATH,
-      content: serializeConfig(config),
+      content: options.configYaml ?? serializeConfig(config),
       management: 'seeded',
       sourceId: 'wrkrs/config',
       sourceVersion: CORE_SOURCE_VERSION,
       component: CORE_COMPONENT,
-      reason: 'Repository-owned wrkrs configuration (editable)',
+      reason: options.schemaMigration
+        ? 'Comment-preserving schema migration of repository configuration'
+        : 'Repository-owned wrkrs configuration (editable)',
+      ...(options.schemaMigration ? { schemaMigration: true as const } : {}),
     },
     {
       path: SCHEMA_PATH,
@@ -185,7 +190,7 @@ export async function prepareInit(
       ),
     )
   }
-  const roles = compilePortableRoles(roster)
+  const roles = compilePortableRoles(roster, config.execution)
   const analysis = adapter.analyze(scanned)
   const desired: DesiredComponent[] = [
     ...compileCoreComponents(config, roles),

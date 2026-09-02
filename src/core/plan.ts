@@ -50,6 +50,12 @@ export interface DesiredComponent {
   readonly sourceVersion: number
   readonly component: string
   readonly reason: string
+  /**
+   * When true, update replaces this seeded file even if it drifted from the
+   * last applied hash. Proposed content must be a comment-preserving schema
+   * migration of the current bytes, not a regenerate.
+   */
+  readonly schemaMigration?: true
 }
 
 export interface PlanOperation {

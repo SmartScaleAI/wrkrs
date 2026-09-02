@@ -1,6 +1,6 @@
 # wrkrs decision log
 
-Last updated: 2026-08-31
+Last updated: 2026-09-02
 
 Statuses:
 
@@ -528,13 +528,101 @@ Deliberately not decided here: `--force` uninstall and field-specific merges for
 
 Implementation added one decision the design did not anticipate: an update adopts an edit to a seeded file that round-trips through the generator, recording the current hash as last applied. Editing `.wrkrs/config.yaml` is the intended workflow for a seeded file; without adoption that edit would be reported as a customization forever and every later uninstall would end partial. An edit that does not round-trip is still preserved and reported, unchanged.
 
+### A-022: Providers are capability bindings to connections the environment already owns
+
+Status: Direction approved by the owner on 2026-09-01; resolves D-001  
+Date: 2026-09-01
+
+Supersession: A-024 supersedes only the internal naming and contract-shape detail below that retained `ProviderAdapter`. The canonical Increment 3 contract is `ProviderDefinition` in architecture.md. Every other decision in this record stands. The original text below is preserved as history.
+
+A provider in wrkrs binds a capability a worker needs to a connection this environment already has. It is not an installer, an authenticator, or a package manager.
+
+Decision:
+
+- A provider never installs an MCP server, authenticates a provider account, requests or stores a token, writes a literal credential, manages a provider package, or modifies `.mcp.json`. It declares which capabilities it can supply, validates a binding the owner wrote, and contributes instruction text to wrkrs-owned files.
+- `.mcp.json` stays strictly read-only. The analyzer already inspects it for project-scoped server names and transport types and never for content; that is the only access Increment 3 has. The rule in architecture.md permitting a future provider to add its own namespaced server entry is preserved as a possible later opt-in, and is explicitly not part of Increment 3.
+- Because no shared strict-JSON edit is implemented, `jsonc-parser` is not added. The owner's approval to adopt it stands and applies to the first real shared strict-JSON edit, whenever that increment is proposed.
+- The `patched` ownership mode is not implemented to exercise the abstraction. It stays declared in the manifest contract and unused until a change actually owns selectors inside a shared file.
+- User-facing language is "connection" and "capability binding". The internal `ProviderAdapter` naming is retained; renaming it would churn the contract without changing behavior.
+- Authentication stays external. An MCP server or an approved CLI owns its own credentials. wrkrs never asks for a secret, never adds a credential field to committed configuration, never prints raw provider or CLI output, never contacts a provider during planning or a dry run, and never claims a connection is authenticated when it cannot prove it.
+- A binding records how much wrkrs can actually verify: a project-scoped server proven present in `.mcp.json`, a server name the owner supplied for a user-, local-, or cloud-scoped connection that repository files cannot confirm, a named connection that is missing, or a manual fallback with no tool access at all. The same repository configuration stays usable locally and in Claude Code cloud sessions, and reports honestly that environment-owned connections may differ between them.
+
+Rationale:
+
+- The product promise is a team installed into a repository, not a broker holding credentials. Every capability that would require wrkrs to hold or route a secret is a capability the environment already provides better.
+- Reading `.mcp.json` and never writing it keeps the strongest guarantee the first two increments earned — wrkrs touches only what it owns — intact through the increment that would most easily erode it.
+- Verification states must be distinguishable because the honest answer is frequently "the owner says this exists and repository files cannot confirm it". Collapsing that into either "configured" or "broken" would make wrkrs either overclaim or refuse legitimate cloud and user-scoped setups.
+
+D-001 is resolved by this record; its original text is preserved below as history. A-024 later supersedes only the internal `ProviderAdapter` naming/contract detail above; nothing else in this record is superseded.
+
+### A-023: Adaptive execution policy
+
+Status: Direction approved by the owner on 2026-09-01  
+Date: 2026-09-01
+
+The four default roles stay installed and available, but not every role runs for every task. The Product Manager performs a bounded triage and selects the smallest workflow that safely satisfies the request.
+
+Decision:
+
+- Triage evaluates three criteria independently: work size (affected code, systems, coordination), risk (consequence if wrong, and difficulty of rollback), and ambiguity (unresolved product or technical decisions). Issue severity and ticket priority are never used as a proxy for complexity.
+- The routing decision is expressed as an execution profile with independent controls rather than one opaque complexity score: planning (`minimal` | `standard` | `detailed`), design (`none` | `reuse-existing` | `new`), engineering (`single` | `parallel`), verification (`targeted` | `affected-suite` | `comprehensive`), and reasoning (`fast` | `balanced` | `deep`).
+- Three named profiles are defined — Fast, Standard, and Full — each with explicit selection rules. A set of high-risk triggers mandates escalation and can never be routed through an unrestricted fast path.
+- Design is a workflow category, not automatically the Product Designer's work. User flows, interaction, visual design, and prototypes go to the Product Designer; architecture, APIs, schemas, and data models go to a Software Engineer instance with the relevant specialization. A task may need both, or neither. No permanent architect, frontend, backend, or data-science role is added.
+- The owner may request a faster or more thorough workflow. The Product Manager may always escalate rigor when it discovers risk, and never de-escalate below a floor the owner set. A request for speed removes unnecessary stages; it never bypasses the governance gates covering planning approval, security and permissions, secrets, billing, production dependencies, data migrations, external integrations, merges, deployments, publications, and releases.
+- Every profile keeps a quality floor: clear success criteria, no unrelated scope expansion, verification evidence proportional to risk, a final diff review, explicit assumptions and blockers, and no automatic merge, deployment, publication, or release. Role content explicitly prohibits adjacent refactoring, speculative improvement, unnecessary research, and documentation the task did not ask for.
+- The routing decision is prompt-guided behavior compiled into role and projection content. The CLI can enforce that the content is present, well formed, and consistent with configuration; it cannot enforce what a worker decides at run time. Documentation and tests must not claim otherwise.
+
+Rationale:
+
+- Running every role for every task spends the owner's time on coordination that the task did not need, which is the failure the policy exists to correct.
+- Independent controls stay legible and adjustable. A single score would hide the case the owner named: a small change that still needs comprehensive verification, and a large mechanical change that needs none of the product design.
+- Separating enforceable from prompt-guided behavior is the only honest way to ship routing through a language model. Claiming deterministic enforcement would be false, and shipping it silently would make the tests meaningless.
+
+### A-024: Independent review remediation of the Increment 3 plan
+
+Status: Approved by the owner on 2026-09-01  
+Date: 2026-09-02
+
+An independent review of the Increment 3 planning documents found areas where the plan was internally inconsistent, unenforceable as written, or misaligned with the product direction. A later pass on the same archive found remaining issues, which this record also corrects. A-022 and A-023 stand as approved. This record supersedes only the internal naming and contract-shape detail in A-022 that retained `ProviderAdapter`; A-022's original text is preserved as history. Every other A-022 and A-023 decision stands.
+
+Decision:
+
+- **One canonical binding contract.** `ProviderDefinition` is the single canonical contract, defined in architecture.md and referenced from mvp.md rather than restated. A-024 supersedes only the internal naming/contract detail in A-022 that retained `ProviderAdapter`. The earlier `ProviderAdapter` shape returned `DesiredComponent[]` from `planConfiguration`. Providers no longer produce files, so that method is removed rather than left unimplemented. Providers may return probes, diagnostics, validation results, and sanitized guidance. They never return a `DesiredComponent`, never access the writer, and never reach the transaction. The runtime adapter compiles provider guidance into files wrkrs already owns.
+- **The binding value is a strict discriminated union on `kind`.** `mcp-server` requires `server` and `scope`; `cli` requires a bare `executable` name that wrkrs looks up on PATH and never executes; `manual` requires neither. Unknown keys are rejected and no field holds, references, or names a credential. Which provider may supply which capability through which kind is an explicit matrix, so `github`, `linear`, `figma`, `mcp`, and `manual` are each implementable as written.
+- **Generic MCP and manual support only Increment 3 read capabilities.** They do not implicitly support every vocabulary entry. The reserved mutation identifiers `pull-request-comment`, `work-item-update`, and `design-update` remain in the vocabulary but are not bindable, projectable, offered during setup, or declared by a registered provider. A `connections` key that is a reserved mutation capability is rejected with `CONNECTION_CAPABILITY_RESERVED`. Generic MCP follows the capability-keyed shape: one map entry satisfies exactly one capability, so a binding never carries a capability list. The earlier acceptance test requiring an explicit non-empty capability list described a shape the configuration cannot express and is corrected to assert the opposite: a capability list inside a binding is a schema violation.
+- **Verification gains an environment-scoped state.** A CLI found on PATH now is `verified-environment`, which is honest about being true on this machine and unknown in a Claude Code cloud session, and is never recorded as a portable repository fact. `unavailable` becomes `absent`, a fact rather than a judgment, with severity assigned per kind and scope: a missing project-scoped server is an error because configuration asserted a repository fact that is false, while a missing CLI is a warning because the environment legitimately differs.
+- **Repository-derived identifiers are untrusted input.** MCP server names are read from a file wrkrs did not write, in a repository that may be hostile, and are compiled into Markdown an agent reads and a terminal a person reads. Every such identifier is validated against a bounded character class and length before use, and the policy is reject-then-render: a value that cannot be proven safe never reaches a generated file, and is reported as a finding with the value replaced by a bounded escaped rendering. Control characters, escape sequences, newlines, Markdown structural characters, and YAML-breaking input are rejected, not escaped after the fact. The same rendering rule applies to a non-empty legacy `providers` map: migration still blocks and every key is accounted for, but diagnostics never print hostile keys raw.
+- **The credential claim becomes enforceable.** "Configuration contains no credential value" cannot be tested, because wrkrs cannot recognize an arbitrary secret a person pasted into a note. The testable claim replaces it: the schema defines no credential-bearing field, and wrkrs never requests, generates, or knowingly emits a credential.
+- **Machine-driven setup is a non-blocking protocol, not a GUI.** Two distinct digests are required. `questionSetDigest` identifies the canonical discovered questions and choices; the plan digest identifies the exact semantic installation plan generated from accepted answers. Discovery is `wrkrs init --json --questions`, which emits the question set and `questionSetDigest`, prompts zero times, and writes nothing. The answers document contains `schemaVersion`, `questionSetDigest`, and strict answers keyed by stable capability-derived question IDs. Preview is `wrkrs init --json --dry-run --answers <file>`, which recomputes and validates the question set, rejects a stale `questionSetDigest`, produces the semantic plan and plan digest, and writes nothing. Apply is `wrkrs init --json --yes --answers <file> --expect-digest <plan-digest>`, which recomputes the questions and plan and applies only when both remain valid. Choice IDs are deterministic and unique across provider, binding kind, scope, and server or executable identity. No CLI process ever waits on a human, no GUI and no runtime adapter is built, and `--yes` without answers stays deterministic and binds nothing.
+- **`--answers` uses a dedicated input-document port.** The answers file is an invocation input, not repository content, so it must not bypass or reuse the hardened repository filesystem port. Absolute paths and paths relative to the invocation working directory are allowed, including files outside the repository. The port opens read-only, requires a regular file, does not follow a final symlink, verifies identity with the opened handle, enforces a 64 KiB limit, requires valid UTF-8 and strict JSON, rejects duplicate keys, never writes the file, and emits only controlled sanitized diagnostics — never raw answer contents or parser source excerpts.
+- **Configuration migrations must preserve what the owner wrote.** A migration that re-serializes `.wrkrs/config.yaml` would destroy comments and key order. Migrations apply a minimal edit through the yaml Document API, as A-004 required and A-021 first exercised for the ownership manifest. The earlier draft cited A-020 for this discipline, which is the bookkeeping ledger and unrelated; the correct references are A-004 and A-021.
+- **The north-star is realigned.** A wrkrs task has a stable identity whether or not an external ticket exists; an external ticket is an optional linked representation. A conversation is a temporary interface, and durable task context eventually records requirements, approved plan versions, decisions, design references, agent assignments, branches, status, and verification evidence. A working worker stays pinned to the plan version approved when it started, and continued discussion produces a draft revision. Storage and synchronization are unresolved and recorded as deferred decisions, not approved implementation choices.
+- **Workflow-cost reporting ships bounded and testable, or not at all.** The self-reported stage log ships in Increment 3A with a fixed output block. Canonical stages are triage, planning, product design, technical design, engineering, verification, QA, and reporting. Each appears exactly once as `run` or `skipped`; skipped stages require a short reason. `retries` is a separate numeric metric, not a workflow stage. The block is labeled model-reported. The elapsed-time line is `Elapsed time: not measured by wrkrs`. No timing is invented and no cause is claimed for the previously reported thirty-seven-minute run.
+- **Acceptance-test numbering is contiguous.** Increment 3 tests occupy 74–143 with no duplicates, gaps, or stale prose describing an older numbering: 74–105 existing Increment 3 tests, 106–109 stage log, 110–119 configuration migration, 120–127 untrusted identifiers, 128–139 machine protocol and safe answers input, 140–143 packaging and regression.
+
+Rationale:
+
+- A contract stated twice in two shapes is a contract the implementation will pick between arbitrarily. One canonical definition with references to it is the only version that survives contact with code.
+- A capability list inside a capability-keyed map is a contradiction that would have been discovered during implementation, when the schema and the acceptance test disagreed. Treating generic MCP or manual as supporting every vocabulary entry would have made reserved mutation capabilities bindable, which Increment 3 forbids.
+- The verification vocabulary existed to be honest about what wrkrs can prove. Without an environment-scoped state it would have had to either call a CLI on PATH a repository fact, which is false in cloud, or call it unverified, which is false locally.
+- Treating an MCP server name as trusted would let a hostile repository write instructions into the file an agent reads. That is the one place in this increment where untrusted data crosses into a privileged context, and it is worth the bounded validation. The same rendering rule is required for hostile legacy `providers` keys, or a hand-edited config could inject control characters into diagnostics.
+- One digest cannot identify both the question set and the installation plan. A caller that approved answers against yesterday's questions, or a plan against yesterday's answers, must be rejected independently. `questionSetDigest` is compared across discovery and later validation; the plan digest is compared only between preview and apply.
+- Reading `--answers` through the repository filesystem port would refuse GUI temporary files outside the worktree. A dedicated read-only input-document port keeps that path from weakening repository containment.
+- Keeping a CLI process alive while a person answers questions in a GUI would make the CLI a session server. The discovery, answer, digest sequence gets the same result with no waiting process and a provable link between what was approved and what is applied.
+
+Scope is unchanged: Increment 3 stays split into 3A and 3B, and this record adds no durable task state, no runtime adapter, no MCP installation, no provider authentication, no remote mutation, and no hosted control plane. The owner approved this record on 2026-09-01. Increment 3A is implemented. Increment 3B implementation was approved by the owner on 2026-09-02.
+
 ## Deferred decisions
 
 ### D-001: Exact provider authentication and capability mappings
 
-Status: Deferred
+Status: Resolved on 2026-09-01 by A-022
 
-Resolve when the GitHub, Linear, and Figma increment begins. Secrets must remain outside committed config. Existing compatible MCP or CLI configuration should be reused only after showing the mapping.
+Original text, preserved as history:
+
+> Resolve when the GitHub, Linear, and Figma increment begins. Secrets must remain outside committed config. Existing compatible MCP or CLI configuration should be reused only after showing the mapping.
+
+Resolution: there is no provider authentication to specify. Providers bind capabilities to connections the environment already owns, secrets never enter committed configuration because wrkrs never handles one, and an existing compatible MCP server or CLI is reused only after the mapping is shown in the plan. See A-022.
 
 ### D-002: Multi-package workspace extraction
 
@@ -566,11 +654,30 @@ Status: Deferred
 
 Cross-repository oversight, mobile approvals, audit history, cost tracking, organization policy, private registries, and enterprise support remain possible future paid capabilities. None may become a dependency of the open-source local core.
 
+### D-007: Durable task context storage
+
+Status: Deferred
+
+A wrkrs task has a stable identity independent of any external ticket, and durable task context eventually records requirements, approved plan versions, decisions, design references, agent assignments, branches, status, and verification evidence. Where that lives is unresolved: committed repository files, a local cache outside the repository, or the linked task platform each trade portability, reviewability, and merge behavior differently. Nothing is approved. Resolve when durable task context is proposed as its own increment; a hosted database and a second project-management system remain excluded.
+
+### D-008: Task synchronization and live orchestration
+
+Status: Deferred
+
+How durable task context synchronizes with an optional external ticket, how workers are dispatched and observed while running, and how an interrupted run resumes are all unresolved. Plan-version pinning is the proposed semantic in A-024; the mechanism that enforces it is not designed. Automatic ticket creation, ticket mutation, and status transitions stay excluded until this is resolved.
+
+### D-009: Additional runtime adapters
+
+Status: Deferred
+
+Cursor, Codex, and other runtimes remain possible through the existing runtime adapter contract. None is scheduled, and Increment 3 adds no adapter. Resolve when a second runtime is proposed with its own increment.
+
 ## Approval record
 
 Architecture approval: Approved by the owner on 2026-08-29  
 Vertical slice approval: Approved by the owner on 2026-08-29  
 Production dependency approval: Approved by the owner on 2026-08-29 (commander, zod, yaml)  
-Implementation repository selection: Approved by the owner on 2026-08-29 (github.com/SmartScaleAI/wrkrs, public, MIT)
+Implementation repository selection: Approved by the owner on 2026-08-29 (github.com/SmartScaleAI/wrkrs, public, MIT)  
+Increment 3 plan approval: Approved by the owner on 2026-09-01 (A-022, A-023, A-024); Increment 3A implemented; Increment 3B implementation approved by the owner on 2026-09-02
 
 Implementation status: the first vertical slice was implemented on 2026-08-29, committed as a8e4a5ba567dc06a96868bf941b242a00e30df49 on review/mvp-vertical-slice, and pushed to origin for independent review; the remote's default branch main also points at that commit. The first review remediation (A-016) was committed as baab7195004463c06ff3bc0aa1b8b765eb34df0b on review/mvp-vertical-slice and pushed; the second (A-017) as 14c8c4c0890196741a86e7ad045c04bb5ef0e81a; the third (A-018) as 61df451e41d6884082983af1376c5a030a300f7b; the fourth (A-019) as 0b8b9140328e7678ee85ce5b4c9d50de0e17c10a; the fifth (A-020) follows on the same branch. No pull request, npm publication, deployment, merge, or release has occurred.

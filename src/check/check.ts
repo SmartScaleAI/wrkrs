@@ -110,6 +110,7 @@ export async function runCheck(input: CheckInput, ports: CheckPorts): Promise<Ch
     wrkrsVersion: input.wrkrsVersion,
     activeTransactionId: input.activeTransactionId ?? null,
     config: null,
+    configSchemaVersion: null,
     manifest: null,
     manifestSchemaVersion: null,
   }

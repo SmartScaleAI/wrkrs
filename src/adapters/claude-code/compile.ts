@@ -70,6 +70,7 @@ export function compileClaudeCodeComponents(input: AdapterCompileInput): Desired
       roleBody: body,
       rosterList: roster,
       governance,
+      executionProfile: input.config.execution.profile,
     })
     components.push({
       path: agentPath(role.id),
@@ -87,6 +88,7 @@ export function compileClaudeCodeComponents(input: AdapterCompileInput): Desired
     content: renderTemplate(skillTemplate, {
       primaryAgent: agentName(input.roster.primaryRoleId),
       rosterList: roster,
+      executionProfile: input.config.execution.profile,
     }),
     management: 'managed',
     sourceId: SKILL_SOURCE_ID,

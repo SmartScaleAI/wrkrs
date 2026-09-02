@@ -1,6 +1,6 @@
 import { z } from 'zod'
 
-import type { WrkrsConfig } from '../core/configuration.js'
+import { EXECUTION_PROFILES, type WrkrsConfig } from '../core/configuration.js'
 import type { OwnershipManifest, TransactionJournal } from '../core/ownership.js'
 import { INSTALLATION_STATES, MANAGEMENT_MODES } from '../core/ownership.js'
 
@@ -30,34 +30,54 @@ export const configRoleSchema = z.strictObject({
     .describe('Task-specific specializations attached to this role.'),
 })
 
+const configBody = {
+  preset: z.strictObject({
+    id: z.literal('product-engineering').describe('Framework preset identifier.'),
+    version: z.int().positive().describe('Preset version the roster was generated from.'),
+  }),
+  runtime: z.strictObject({
+    primary: z.literal('claude-code').describe('Primary runtime adapter identifier.'),
+  }),
+  roster: z.strictObject({
+    primaryRole: identifier.describe('Role that coordinates the others.'),
+    roles: z.array(configRoleSchema).min(1),
+  }),
+  governance: z.strictObject({
+    requirePlanApproval: z.boolean(),
+    requireDesignApproval: z.boolean(),
+    requireOwnerTestForUserFacingOrNativeWork: z.boolean(),
+    requireExplicitReleaseApproval: z.boolean(),
+  }),
+  providers: z
+    .record(identifier, z.unknown())
+    .describe(
+      'Provider configuration keyed by provider identifier. Secrets are never stored here.',
+    ),
+  extensions: z
+    .record(z.string(), z.unknown())
+    .describe('Explicit extension data preserved by wrkrs but not interpreted by it.'),
+}
+
+/** Version 1: the first durable format. Read for migration; never written again. */
 export const configSchemaV1 = z
   .strictObject({
     schemaVersion: z.literal(1).describe('Configuration schema version.'),
-    preset: z.strictObject({
-      id: z.literal('product-engineering').describe('Framework preset identifier.'),
-      version: z.int().positive().describe('Preset version the roster was generated from.'),
+    ...configBody,
+  })
+  .describe('wrkrs repository configuration (schema version 1)')
+
+/** Version 2 adds the execution profile floor the Product Manager may raise and must never lower. */
+export const configSchemaV2 = z
+  .strictObject({
+    schemaVersion: z.literal(2).describe('Configuration schema version.'),
+    ...configBody,
+    execution: z.strictObject({
+      profile: z
+        .enum(EXECUTION_PROFILES)
+        .describe(
+          'Execution profile floor: adaptive lets the Product Manager triage; fast, standard, and full set a floor that may be raised and never lowered.',
+        ),
     }),
-    runtime: z.strictObject({
-      primary: z.literal('claude-code').describe('Primary runtime adapter identifier.'),
-    }),
-    roster: z.strictObject({
-      primaryRole: identifier.describe('Role that coordinates the others.'),
-      roles: z.array(configRoleSchema).min(1),
-    }),
-    governance: z.strictObject({
-      requirePlanApproval: z.boolean(),
-      requireDesignApproval: z.boolean(),
-      requireOwnerTestForUserFacingOrNativeWork: z.boolean(),
-      requireExplicitReleaseApproval: z.boolean(),
-    }),
-    providers: z
-      .record(identifier, z.unknown())
-      .describe(
-        'Provider configuration keyed by provider identifier. Secrets are never stored here.',
-      ),
-    extensions: z
-      .record(z.string(), z.unknown())
-      .describe('Explicit extension data preserved by wrkrs but not interpreted by it.'),
   })
   .describe('wrkrs repository configuration')
 
@@ -148,7 +168,7 @@ export const journalSchemaV1 = z.strictObject({
 // Compile-time guarantees that the runtime schemas produce the core contracts.
 type Extends<A, B> = A extends B ? true : false
 type Assert<T extends true> = T
-export type ConfigSchemaMatchesCore = Assert<Extends<z.output<typeof configSchemaV1>, WrkrsConfig>>
+export type ConfigSchemaMatchesCore = Assert<Extends<z.output<typeof configSchemaV2>, WrkrsConfig>>
 export type ManifestSchemaMatchesCore = Assert<
   Extends<z.output<typeof manifestSchemaV2>, OwnershipManifest>
 >

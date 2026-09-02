@@ -1,6 +1,6 @@
 # wrkrs CLI architecture
 
-Status: Approved by the owner on 2026-08-29; first vertical slice implemented; second increment proposed in mvp.md and decisions.md A-021  
+Status: Approved by the owner on 2026-08-29; first and second increments implemented; third increment plan approved by the owner on 2026-09-01 (decisions.md A-022, A-023, A-024); Increment 3A implemented; Increment 3B implementation approved by the owner on 2026-09-02
 Architecture review date: 2026-08-29
 
 ## Context
@@ -396,6 +396,7 @@ The first repository is one package:
         paths.ts
         clock.ts
         ids.ts
+        input-document.ts
     test/
       unit/
       integration/
@@ -408,7 +409,8 @@ The first repository is one package:
 - core imports no CLI framework, filesystem implementation, Claude-specific code, or provider-specific code.
 - config depends on core data types and Zod.
 - repository produces a RepositorySnapshot and does not choose installation changes.
-- runtime adapters and providers consume core contracts and return desired components or diagnostics.
+- runtime adapters consume core contracts and return desired components or diagnostics.
+- providers consume core contracts and may return probes, diagnostics, validation results, and sanitized guidance. A provider never returns a DesiredComponent, never accesses the writer, and never reaches the transaction. The runtime adapter compiles provider guidance into files wrkrs already owns.
 - planner compares a snapshot with desired state and returns an immutable InstallPlan.
 - writer consumes only a validated plan and filesystem ports. It does not know Claude semantics.
 - check composes independent validations and returns structured diagnostics.
@@ -444,12 +446,25 @@ The exact field names may be refined during implementation, but these boundaries
       validate(context: AdapterValidationContext): Diagnostic[]
     }
 
-    interface ProviderAdapter {
-      id: string
-      capabilities: CapabilityId[]
+    // Canonical Increment 3 contract (decisions.md A-024). A-024 supersedes
+    // only the internal naming/contract detail in A-022 that retained
+    // ProviderAdapter; A-022's original text is preserved as history.
+    // The earlier shape returned DesiredComponent[] from planConfiguration;
+    // providers no longer produce files, so that method is removed rather
+    // than left unimplemented. See "Capability bindings" below.
+    interface ProviderDefinition {
+      id: ProviderId                            // github | linear | figma | mcp | manual
+      title: string
+      capabilities: readonly CapabilityId[]     // Increment 3 read capabilities only
+      kinds: readonly BindingKind[]             // how it may be bound
       probe(context: ProviderProbeContext): ProviderProbe
-      planConfiguration(input: ProviderPlanInput): DesiredComponent[]
-      diagnose(context: ProviderCheckContext): Diagnostic[]
+      validate(context: ProviderBindingContext): readonly Diagnostic[]
+      describe(binding: ResolvedBinding): ProviderGuidance
+    }
+
+    interface ProviderGuidance {
+      summary: string                           // sanitized, single line
+      instructions: readonly string[]           // sanitized, no newlines
     }
 
     interface InstallPlan {
@@ -463,7 +478,198 @@ The exact field names may be refined during implementation, but these boundaries
       digest: string
     }
 
-Workflows request capabilities rather than provider names. Initial capability families include source control and pull requests, work items, design files and comments, and generic tool context. GitHub, Linear, and Figma later satisfy those capabilities. A manual provider can emit instructions or links without credentials. A generic MCP provider maps existing server names to capabilities only after the mapping is shown.
+Workflows request capabilities rather than provider names. A provider declares which Increment 3 read capabilities it can supply and is bound to a connection the environment already owns; it never installs, authenticates, or brokers anything (decisions.md A-022). The canonical provider contract is `ProviderDefinition` (decisions.md A-024).
+
+### Capability bindings
+
+A capability names what a worker needs. A binding names how one capability is satisfied in this repository, and there is exactly one binding per capability: a primary route, never automatic fan-out or hidden failover. The configuration is keyed by capability, so a second route cannot be expressed at all and ambiguity is prevented by the shape of the file rather than detected afterwards.
+
+Each map entry satisfies exactly one capability. The key is the capability, so
+a binding never carries a capability list, and the generic existing-MCP route
+is one entry per capability rather than one entry claiming several.
+
+The binding value is a strict discriminated union on `kind`. Unknown keys are
+rejected; there is no open-ended object anywhere in it.
+
+    # kind: mcp-server
+    <capability>:
+      provider: github | linear | figma | mcp     # required
+      kind: mcp-server                            # required
+      server: <mcp-server-name>                   # required
+      scope: project | user | local | cloud       # required
+      note: <short text>                          # optional
+
+    # kind: cli
+    <capability>:
+      provider: github                            # required
+      kind: cli                                   # required
+      executable: <executable-name>               # required
+      note: <short text>                          # optional
+
+    # kind: manual
+    <capability>:
+      provider: manual                            # required
+      kind: manual                                # required
+      note: <short text>                          # optional
+
+`scope` states where the owner says the server is configured, and is the only
+thing that makes verification meaningful: `project` asserts a fact about
+`.mcp.json` that wrkrs can check, while `user`, `local`, and `cloud` assert a
+fact about an environment wrkrs cannot see. `executable` is a bare program
+name, never a path, never arguments, and never a command line: wrkrs performs
+a PATH lookup and never executes it.
+
+No field in this schema holds, references, or names a credential.
+
+Which provider may be bound how, and to what:
+
+| Provider | Capabilities it can supply | Allowed kinds |
+| --- | --- | --- |
+| `github` | `source-control-context`, `pull-request-context` | `mcp-server`, `cli` |
+| `linear` | `work-item-context` | `mcp-server` |
+| `figma` | `design-file-context`, `design-comment-context` | `mcp-server` |
+| `mcp` | `source-control-context`, `pull-request-context`, `work-item-context`, `design-file-context`, `design-comment-context` | `mcp-server` |
+| `manual` | `source-control-context`, `pull-request-context`, `work-item-context`, `design-file-context`, `design-comment-context` | `manual` |
+
+Generic MCP and manual support only those Increment 3 read capabilities. They
+do not implicitly support every vocabulary entry. The reserved mutation
+identifiers `pull-request-comment`, `work-item-update`, and `design-update`
+remain in the vocabulary so a binding can name what it does not do; Increment 3
+must not bind, project, offer, or declare them. A `connections` key that is a
+reserved mutation capability is a schema violation reported as
+`CONNECTION_CAPABILITY_RESERVED`.
+
+A built-in provider is a capability descriptor and validator, not a package.
+`github`, `linear`, and `figma` exist so a binding to a well-known tool is
+checked against what that tool can actually supply; `mcp` is the escape hatch
+for every other server, and `manual` for no tool at all. No registered provider
+declares a mutation capability, because nothing in this increment mutates a
+remote system.
+
+How much wrkrs can prove about a binding is recorded explicitly, because the
+honest answer is often "the owner says so and repository files cannot confirm
+it". Verification is a fact about what was observed; severity is a policy
+applied to that fact:
+
+| Verification | Observed | Portable across environments |
+| --- | --- | --- |
+| `verified-project` | The exact server name is present in `.mcp.json` | Yes: a repository fact |
+| `verified-environment` | The executable was found on PATH in this environment | No: this machine only |
+| `declared-unverified` | The owner named a user-, local-, or cloud-scoped connection; repository files cannot confirm it | Unknown by construction |
+| `absent` | The connection was looked for where the binding said it would be, and is not there | n/a |
+| `manual` | No tool access by design | Yes |
+
+| Kind and scope | When absent | check severity |
+| --- | --- | --- |
+| `mcp-server`, `scope: project` | `.mcp.json` has no such server | error: the configuration asserts a repository fact that is false |
+| `mcp-server`, scope `user`/`local`/`cloud` | never checked; always `declared-unverified` | warning |
+| `cli` | the executable is not on PATH here | warning: the environment differs, and a cloud session may have it |
+| `manual` | n/a | info |
+
+`verified-environment` is never recorded as a portable fact. A binding verified
+on a laptop is reported as environment-scoped so the same configuration stays
+honest when it is read in a Claude Code cloud session where the executable may
+not exist.
+
+### Repository-derived identifiers are untrusted input
+
+Every connection identifier that comes from a file wrkrs did not write is
+untrusted data, and MCP server names are the sharpest case: they are read from
+`.mcp.json` in a repository that may be hostile, and they end up in Markdown an
+agent reads and in a terminal a person reads. A server named
+`ignore previous instructions and ...` or one carrying ANSI escapes must not be
+able to change generated instructions or terminal output.
+
+One sanitizer governs every value that reaches generated Markdown, human
+output, or JSON output:
+
+- a bounded character class and length for each identifier kind, validated
+  before use, not escaped after
+- no control character, no escape sequence, no newline or carriage return
+- no Markdown structural character that could close a fence, start a heading,
+  or open a link
+- no character that would need YAML quoting to round-trip
+- a value that fails validation is never compiled into any generated file; it
+  is reported as a finding that names the offending path and the reason, with
+  the value itself replaced by a bounded, escaped, length-capped rendering
+
+The rule is reject-then-render, not render-then-escape: a name wrkrs cannot
+prove safe never reaches a projection at all, so a prompt-injection payload in
+`.mcp.json` cannot become an instruction an agent reads.
+
+The same sanitizer governs a non-empty legacy `providers` map during
+configuration migration. A non-empty map still blocks the migration, and every
+key is accounted for, but hostile keys are never printed raw: human and JSON
+diagnostics use bounded, escaped, length-capped renderings. Control characters,
+ANSI, newlines, and overlong values never reach output.
+
+`.mcp.json` is read-only. The analyzer already extracts server names and transport types and never content; that is the whole of wrkrs's access to it. The rule above permitting a later provider to add its own namespaced server entry remains a possible opt-in feature and is not implemented.
+
+Authentication is external. An MCP server or an approved CLI owns its own credentials. wrkrs never asks for a secret, adds a credential field to committed configuration, prints raw provider or CLI output, contacts a provider during planning or a dry run, or claims a connection is authenticated when it cannot prove it. Presence detection is limited to what the optional Claude executable check already does: a PATH lookup, with no execution.
+
+### Adaptive execution
+
+The four default roles stay installed and available; not every role runs for every task. The Product Manager triages each request on work size, risk, and ambiguity independently, then selects an execution profile built from independent controls — planning, design, engineering, verification, and reasoning — rather than one opaque complexity score. Design is a workflow category: user-facing design goes to the Product Designer, technical design goes to a Software Engineer instance with the relevant specialization, and no permanent architect, frontend, backend, or data-science role is added. High-risk triggers mandate escalation, a request for speed never bypasses a governance gate, and every profile keeps the same quality floor. decisions.md A-023 holds the policy.
+
+This behavior is prompt-guided. wrkrs compiles it into role definitions and runtime projections and can enforce that the content is present, well formed, and consistent with configuration. It cannot enforce what a worker decides at run time, and neither the documentation nor the tests claim that it does. The Product Manager definition also carries a bounded self-reported stage log using the canonical stages triage, planning, product design, technical design, engineering, verification, QA, and reporting; `retries` is a separate numeric metric, not a stage. Elapsed time is reported as `Elapsed time: not measured by wrkrs`.
+
+### North-star feature workflow
+
+The full workflow this architecture is aimed at, most of which is deliberately not implemented yet:
+
+1. An idea, bug, or existing ticket enters through the Product Manager.
+2. The Product Manager establishes or validates acceptance criteria.
+3. The Product Manager selects an adaptive execution profile.
+4. Product or technical design happens only when the profile calls for it.
+5. Engineering is delegated to one or more task-specific Software Engineer instances.
+6. QA validates proportionally to risk.
+7. The task becomes ready for release.
+8. The owner tests, merges, deploys, or releases explicitly.
+
+A wrkrs task has its own stable identity. It exists as soon as the Product
+Manager accepts a request, whether or not a Linear or Jira ticket was ever
+created, and it keeps that identity for its whole life. An external ticket is
+an optional linked representation of a task, never a prerequisite for having
+one. A repository with no task platform at all must be able to run the full
+workflow.
+
+A conversation is a temporary interface to a task, not the task and not a
+source of truth. Durable task context eventually records: the requirement and
+its acceptance criteria; approved plan versions; decisions and their rationale;
+design references; agent assignments; branches; status; and verification
+evidence. None of that is implemented yet.
+
+Plan versioning is what makes the temporary interface safe. A worker that has
+started work stays pinned to the plan version that was approved when it
+started. Continued discussion with the Product Manager produces a draft
+revision rather than silently moving the ground under a running worker; a new
+version takes effect only when it is approved and work is re-dispatched
+against it.
+
+The durable sources of truth stay: the Git repository for code, tests,
+configuration, and lasting decisions; `.wrkrs/config.yaml` for workflow, role,
+capability, and governance configuration; the design platform for design
+artifacts; and, when one is linked, the task platform for the external
+representation of a task. wrkrs adds no hosted database and no second
+project-management system.
+
+Canonical workflow stages stay distinct from external task-platform statuses.
+The Increment 3 self-reported stage-log vocabulary is: triage, planning,
+product design, technical design, engineering, verification, QA, and reporting.
+Each of those stages appears exactly once as `run` or `skipped`; a skipped
+stage carries a short reason. `retries` is a separate numeric metric, not a
+workflow stage. Mapping those stages to custom Linear or Jira statuses remains
+deferred.
+
+Everything in this section beyond the stage vocabulary is deferred past
+Increment 3, and the storage and synchronization choices it implies are
+genuinely unresolved rather than approved: where durable task context lives,
+how it synchronizes with an external ticket, how live orchestration and
+automated resumption work, and whether a Cursor or other runtime adapter
+participates. Those are recorded as deferred decisions D-007 through D-009.
+External ticket creation, ticket mutation, status synchronization, design
+mutation, durable run state, automated resumption, and hosted state remain
+north-star behavior, not current scope.
 
 ## Repository-owned installed layout
 
@@ -519,6 +725,29 @@ Conceptual config:
     providers: {}
     extensions: {}
 
+That is schema version 1, as the first slice shipped it. Schema version 2 adds
+`execution`, and schema version 3 replaces the `providers` record with a
+`connections` map keyed by capability:
+
+    schemaVersion: 3
+    # ... preset, runtime, roster, governance unchanged ...
+    execution:
+      profile: adaptive
+    connections:
+      work-item-context:
+        provider: linear
+        kind: mcp-server
+        server: linear
+        scope: project
+    extensions: {}
+
+`providers` is not carried forward. Every installation in existence holds an
+empty record, so the migration is total; a non-empty record can only come from
+hand editing and blocks. Every key is accounted for. Diagnostics never print
+hostile keys raw: output uses bounded, escaped, length-capped renderings, and
+control characters, ANSI, newlines, and overlong values never reach human or
+JSON output raw.
+
 The detected stack changes specializations and evidence, not the four default role identities. A repository may edit the resulting roster after installation.
 
 ## Complete init flow
@@ -530,6 +759,7 @@ The detected stack changes specializations and evidence, not the four default ro
 - Resolve the Git worktree root from the requested working directory.
 - Reject a bare repository, unsupported platform condition, invalid path, or missing Git.
 - Create no target file or directory.
+- `--questions` and `--answers` are Increment 3B machine-protocol flags. They never prompt. `--answers` is read through the dedicated input-document port, not the repository filesystem port.
 
 ### 1. Read-only scan
 
@@ -563,7 +793,9 @@ The detected stack changes specializations and evidence, not the four default ro
 ### 5. Desired-state compilation
 
 - Compile portable config, role definitions, schema, manifest intent, and Claude adapter projections in memory.
-- Ask provider and runtime registries for components through contracts.
+- Ask the runtime-adapter registry for desired components.
+- Ask the provider registry for probes, diagnostics, validation results, and sanitized guidance. Providers never return a `DesiredComponent` and never access the writer.
+- The runtime adapter compiles provider guidance into files wrkrs already owns.
 - Do not write temporary data inside the target repository.
 
 ### 6. Plan
@@ -636,6 +868,22 @@ The dry run performs zero writes beneath the target root. The --dry-run flag exi
 - Suggest invoking the wrkrs project skill from Claude Code.
 - Do not run Claude Code, commit generated files, or contact providers automatically.
 
+### Machine-driven init (Increment 3B)
+
+Human terminal prompts are unchanged. A machine caller uses three non-blocking invocations and two distinct digests:
+
+- `questionSetDigest` identifies the canonical discovered questions and choices.
+- The plan digest identifies the exact semantic installation plan generated from accepted answers.
+
+1. `wrkrs init --json --questions` runs the read-only scan, emits the question set and `questionSetDigest`, prompts zero times, writes nothing, and exits before desired-state compilation.
+2. The answers document contains `schemaVersion`, `questionSetDigest`, and strict answers keyed by stable capability-derived question IDs.
+3. `wrkrs init --json --dry-run --answers <file>` recomputes and validates the question set, rejects a stale `questionSetDigest`, produces the semantic plan and plan digest, writes nothing, and exits.
+4. `wrkrs init --json --yes --answers <file> --expect-digest <plan-digest>` recomputes the questions and plan and applies only when both the answers document and the expected plan digest remain valid.
+
+Question IDs are capability-derived. Choice IDs are deterministic and unique across provider, binding kind, scope, and server or executable identity: a dedicated Linear choice and a generic MCP choice referencing the same server never share an ID. Reserved mutation capabilities are never asked or offered.
+
+`--yes` without `--answers` remains the deterministic no-binding path. `--expect-digest` names the plan digest from step 3, never `questionSetDigest`.
+
 ## Conflict taxonomy
 
 | Code family | Example | Result |
@@ -662,6 +910,19 @@ The dry run performs zero writes beneath the target root. The --dry-run flag exi
 - Generated text uses UTF-8 and a final newline.
 - Timestamps and IDs come from injectable ports so tests are deterministic.
 
+### Answers-document input
+
+The `--answers` file is an explicitly supplied input document, not repository content. It is not read through the hardened repository filesystem port. A dedicated input-document port owns this boundary:
+
+- Absolute paths and paths relative to the invocation working directory are allowed, including GUI-created temporary files outside the repository.
+- Open read-only. wrkrs never writes to the answers file.
+- The final path must be a regular file. Do not follow a final symlink.
+- Verify file identity with the opened handle (device and inode) against what lstat reported.
+- Enforce a conservative size limit of 64 KiB.
+- Require valid UTF-8 and strict JSON. Reject duplicate keys.
+- Never echo raw answer contents or parser-provided source excerpts.
+- Emit only controlled, sanitized diagnostics.
+
 ## check contract
 
 wrkrs check is a read-only installation health check. It emits stable diagnostic codes and human or JSON output.
@@ -678,6 +939,9 @@ Initial checks:
 - Claude adapter agent and skill frontmatter
 - conflicting namespaced Claude components
 - optional local Claude executable detection
+- capability bindings: unknown provider, unsupported capability, a reserved mutation capability used as a connection key, missing project-scoped server, an unverifiable user-, local-, or cloud-scoped server, an absent `cli` executable, and unbound capabilities
+
+Connection diagnostics never execute a provider, never contact a network, and never print raw provider or CLI output. An unverifiable connection is a warning, not an error: a user-, local-, or cloud-scoped MCP server is a legitimate setup that repository files cannot confirm, and the same configuration must stay usable in local and Claude Code cloud sessions.
 
 Exit codes:
 
@@ -702,6 +966,28 @@ The first implementation includes:
 - clean and existing-Claude fixtures
 
 It intentionally does not implement shared-file structural edits, provider authentication, dedicated GitHub/Linear/Figma configuration, update, uninstall, dynamic plugin loading, or remote services. The abstractions for those features are exercised only where the vertical slice needs them; no unused framework scaffolding should be added.
+
+## Third increment boundary
+
+The third increment includes:
+
+- the adaptive execution policy compiled into role definitions and runtime projections
+- an `execution` configuration section carrying the profile floor the owner set
+- a capability vocabulary that distinguishes reading context from mutating a remote system; mutation identifiers stay reserved and are not bindable, projectable, offered, or declared
+- a `connections` configuration section keyed by capability, one primary route each
+- built-in GitHub, Linear, and Figma capability descriptors and validators, plus a generic existing-MCP binding and a manual fallback, each limited to Increment 3 read capabilities
+- read-only verification of project-scoped MCP server names against `.mcp.json`
+- bounded validation of repository-derived identifiers, with rejection before compilation rather than escaping after it
+- interactive setup questions that author configuration, and deterministic non-interactive behavior that asks nothing
+- a non-blocking machine-driven setup protocol on `init`: question discovery with `questionSetDigest`, a strict versioned answers document, preview of the semantic plan digest, and apply against that expected plan digest
+- a dedicated read-only input-document port for `--answers`
+- comment-preserving configuration migrations to schema version 2 and then 3
+- the bounded self-reported stage log in the Product Manager definition, using the canonical stage vocabulary; `retries` is a separate numeric metric
+- `check` diagnostics for verified, environment-verified, unverified, absent, invalid, reserved, and manual bindings
+
+It intentionally does not implement `.mcp.json` modification, provider account authentication, token storage, arbitrary CLI execution, a broad provider catalog, dynamic third-party code loading, the `patched` ownership mode, a GUI or any runtime adapter consuming the machine protocol, the machine protocol on `update`, external ticket or design mutation, status synchronization, durable task context storage or synchronization, live orchestration, automated resumption, hosted state, or per-stage timing instrumentation. GitHub, Linear, and Figma are built-in capability descriptors, not separately published packages. Jira and other vendors are not new dedicated providers; they reach wrkrs through the generic existing-MCP binding.
+
+No placeholder provider is registered. A provider exists only when it can describe a capability it genuinely supplies.
 
 ## First vertical slice implementation notes
 

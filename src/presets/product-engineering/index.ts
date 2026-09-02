@@ -7,7 +7,7 @@ import type {
   RosterRecommendation,
   Specialization,
 } from '../../core/roster.js'
-import { PRESET_ID, PRESET_VERSION } from '../../core/configuration.js'
+import { PRESET_ID, PRESET_VERSION, type Execution } from '../../core/configuration.js'
 import { ROLES_DIRECTORY } from '../../core/ownership.js'
 import type { CompiledRole } from '../../core/runtime-adapter.js'
 import { renderTemplate } from '../../core/template.js'
@@ -156,12 +156,18 @@ export function renderSpecializationSection(specializations: readonly Specializa
 }
 
 /** Renders every portable role definition for a recommendation. */
-export function compilePortableRoles(recommendation: RosterRecommendation): CompiledRole[] {
+export function compilePortableRoles(
+  recommendation: RosterRecommendation,
+  execution: Execution = { profile: 'adaptive' },
+): CompiledRole[] {
   return recommendation.roles.map((role) => {
     const template = loadRoleTemplate(role.id)
     const variables: Record<string, string> = {}
     if (role.id === 'software-engineer') {
       variables['specializations'] = renderSpecializationSection(role.specializations)
+    }
+    if (role.id === 'product-manager') {
+      variables['executionProfile'] = execution.profile
     }
     return {
       id: role.id,

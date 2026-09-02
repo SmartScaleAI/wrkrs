@@ -41,7 +41,12 @@ export async function detectWrkrs(context: ScanContext): Promise<WrkrsDetection>
   if (configText !== null) {
     const parsed = parseConfigDocument(configText)
     config = parsed.ok
-      ? { path: CONFIG_PATH, valid: true, schemaVersion: parsed.value.schemaVersion, error: null }
+      ? {
+          path: CONFIG_PATH,
+          valid: true,
+          schemaVersion: parsed.value.sourceSchemaVersion,
+          error: null,
+        }
       : {
           path: CONFIG_PATH,
           valid: false,

@@ -4,9 +4,10 @@ import type { WrkrsConfig } from '../core/configuration.js'
 import type { OwnershipManifest, TransactionJournal } from '../core/ownership.js'
 
 const CONFIG_HEADER = [
-  '# wrkrs repository configuration (schema version 1).',
+  '# wrkrs repository configuration (schema version 2).',
   '# Validate with `wrkrs check`. JSON Schema: .wrkrs/schema.json',
   '# Portable role definitions live under .wrkrs/roles and may be edited.',
+  '# execution.profile is the floor the Product Manager may raise and must never lower.',
   '',
 ].join('\n')
 
@@ -33,6 +34,7 @@ export function serializeConfig(config: WrkrsConfig): string {
         config.governance.requireOwnerTestForUserFacingOrNativeWork,
       requireExplicitReleaseApproval: config.governance.requireExplicitReleaseApproval,
     },
+    execution: { profile: config.execution.profile },
     providers: { ...config.providers },
     extensions: { ...config.extensions },
   }
