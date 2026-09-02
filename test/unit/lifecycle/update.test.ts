@@ -356,4 +356,73 @@ describe('wrkrs update planning', () => {
     expect(outcomeOf(built, '.claude/agents/wrkrs-qa-engineer.md')).toBe('block')
     expect(built.blockers.some((blocker) => blocker.code === 'OWNERSHIP_UNOWNED_TARGET')).toBe(true)
   })
+
+  it('88/91: a project MCP server is referenced without changing .mcp.json', async () => {
+    const root = createFixtureRepository('existing-claude-repository', { commit: true })
+    cleanup.push(root)
+    const mcpPath = path.join(root, '.mcp.json')
+    const before = readFileSync(mcpPath)
+    const ports = createTestPorts()
+    const deps = createTestDependencies()
+    const prepared = await prepareInit(root, deps, ports, {
+      connections: {
+        'work-item-context': {
+          provider: 'mcp',
+          kind: 'mcp-server',
+          server: 'fake-tracker',
+          scope: 'project',
+        },
+      },
+    })
+    if (!prepared.ok) throw prepared.error
+    const result = await applyPreparedInit(prepared.value, deps, ports)
+    expect(result.status).toBe('applied')
+    expect(readFileSync(mcpPath)).toEqual(before)
+    const agent = readFileSync(path.join(root, '.claude/agents/wrkrs-product-manager.md'), 'utf8')
+    expect(agent).toContain('fake-tracker')
+    expect(agent).not.toContain('mcpServers')
+    expect(readFileSync(path.join(root, 'CLAUDE.md'), 'utf8')).not.toContain('fake-tracker')
+    expect(readFileSync(path.join(root, '.claude/settings.json'), 'utf8')).not.toContain(
+      'fake-tracker',
+    )
+  })
+
+  it('98: changing a binding replaces only undrifted wrkrs-owned projections', async () => {
+    const { root, ports } = await install()
+    editConfig(root, (text) =>
+      text.replace(
+        'connections: {}',
+        'connections:\n  work-item-context:\n    provider: manual\n    kind: manual',
+      ),
+    )
+    const built = await plan(root, ports)
+    expect(outcomeOf(built, '.claude/agents/wrkrs-product-manager.md')).toBe('replace')
+    for (const target of paths(built, 'replace')) {
+      expect(
+        target.startsWith('.wrkrs/') ||
+          target.startsWith('.claude/agents/wrkrs') ||
+          target.startsWith('.claude/skills/wrkrs'),
+      ).toBe(true)
+    }
+    expect(built.operations.some((operation) => operation.path === '.mcp.json')).toBe(false)
+  })
+
+  it('99: a customized seeded file stays preserved when a binding changes', async () => {
+    const { root, ports } = await install()
+    const roleFile = path.join(root, '.wrkrs/roles/product-manager.md')
+    appendFileSync(roleFile, '\nlocal guidance\n')
+    const customized = readFileSync(roleFile, 'utf8')
+    editConfig(root, (text) =>
+      text.replace(
+        'connections: {}',
+        'connections:\n  work-item-context:\n    provider: manual\n    kind: manual',
+      ),
+    )
+    const built = await plan(root, ports)
+    expect(outcomeOf(built, '.wrkrs/roles/product-manager.md')).toBe('preserve')
+    expect(outcomeOf(built, '.claude/agents/wrkrs-product-manager.md')).toBe('replace')
+    const result = await apply(root, ports)
+    expect(result.status).toBe('applied')
+    expect(readFileSync(roleFile, 'utf8')).toBe(customized)
+  })
 })

@@ -1,9 +1,13 @@
 import YAML from 'yaml'
 import type { z } from 'zod'
 
-import type { WrkrsConfig } from '../core/configuration.js'
+import type { ConnectionMap, WrkrsConfig } from '../core/configuration.js'
+import type { ConnectionBinding } from '../core/connections.js'
+import { isReadCapabilityId, isReservedMutationCapabilityId } from '../core/capabilities.js'
+import { identifierIssues } from '../core/connections.js'
 import type { OwnershipManifest, TransactionJournal } from '../core/ownership.js'
 import { err, ok, type Result } from '../core/result.js'
+import { renderUntrusted } from '../core/sanitize.js'
 import { normalizeRelativePath } from '../platform/paths.js'
 import {
   CURRENT_CONFIG_SCHEMA_VERSION,
@@ -11,6 +15,7 @@ import {
   isSupportedConfigSchemaVersion,
   isSupportedManifestSchemaVersion,
   migrateConfigV1ToV2,
+  migrateConfigV2ToV3,
   migrateManifestV1ToV2,
   SUPPORTED_CONFIG_SCHEMA_VERSIONS,
   SUPPORTED_MANIFEST_SCHEMA_VERSIONS,
@@ -18,6 +23,7 @@ import {
 import {
   configSchemaV1,
   configSchemaV2,
+  configSchemaV3,
   journalSchemaV1,
   manifestSchemaV1,
   manifestSchemaV2,
@@ -44,7 +50,9 @@ export interface DocumentError {
 function formatLocation(path: readonly PropertyKey[]): string | null {
   if (path.length === 0) return null
   return path
-    .map((segment) => (typeof segment === 'number' ? `[${segment}]` : String(segment)))
+    .map((segment) =>
+      typeof segment === 'number' ? `[${segment}]` : renderUntrusted(String(segment)),
+    )
     .join('.')
     .replace(/\.\[/g, '[')
 }
@@ -188,8 +196,17 @@ export function parseConfigDocument(text: string): Result<ParsedConfig, Document
         ),
       )
     }
-    config = migrateConfigV1ToV2(parsed.data)
-  } else {
+    const migrated = migrateConfigV2ToV3(migrateConfigV1ToV2(parsed.data))
+    if (!migrated.ok) {
+      return err({
+        code: migrated.error.code,
+        message: migrated.error.message,
+        schemaVersion: version.value,
+        issues: [],
+      })
+    }
+    config = migrated.value
+  } else if (version.value === 2) {
     const parsed = configSchemaV2.safeParse(value)
     if (!parsed.success) {
       return err(
@@ -199,11 +216,44 @@ export function parseConfigDocument(text: string): Result<ParsedConfig, Document
         ),
       )
     }
-    config = parsed.data
+    const migrated = migrateConfigV2ToV3(parsed.data)
+    if (!migrated.ok) {
+      return err({
+        code: migrated.error.code,
+        message: migrated.error.message,
+        schemaVersion: version.value,
+        issues: [],
+      })
+    }
+    config = migrated.value
+  } else {
+    const reserved = reservedConnectionKey(value)
+    if (reserved) return err(reserved)
+    const parsed = configSchemaV3.safeParse(value)
+    if (!parsed.success) {
+      return err(
+        connectionSchemaError(parsed.error, version.value) ??
+          invalid(
+            zodIssues(parsed.error, 'CONFIG_SCHEMA_VIOLATION'),
+            'config.yaml does not match the schema',
+          ),
+      )
+    }
+    const connections = interpretConnections(parsed.data.connections)
+    if (!connections.ok) return err({ ...connections.error, schemaVersion: version.value })
+    config = { ...parsed.data, connections: connections.value }
   }
   const semantic = validateConfigSemantics(config)
   if (semantic.length > 0) {
-    return err(invalid(semantic, 'config.yaml contains inconsistent roster references'))
+    const connectionIssue = semantic.find((issue) => issue.code.startsWith('CONNECTION_'))
+    return err({
+      code: connectionIssue?.code ?? 'CONFIG_INVALID',
+      message: connectionIssue
+        ? connectionIssue.message
+        : 'config.yaml contains inconsistent roster references',
+      schemaVersion: version.value,
+      issues: semantic,
+    })
   }
   return ok({
     config,
@@ -212,11 +262,114 @@ export function parseConfigDocument(text: string): Result<ParsedConfig, Document
   })
 }
 
-/**
- * Cross-field rules that JSON Schema cannot express. Identifiers echoed here
- * have already passed the kebab-case identifier pattern, so they cannot carry
- * arbitrary content.
- */
+function reservedConnectionKey(value: Record<string, unknown>): DocumentError | null {
+  const connections = value['connections']
+  if (!isPlainObject(connections)) return null
+  for (const key of Object.keys(connections)) {
+    if (isReservedMutationCapabilityId(key)) {
+      return {
+        code: 'CONNECTION_CAPABILITY_RESERVED',
+        message: 'Reserved mutation capabilities cannot be bound',
+        schemaVersion: 3,
+        issues: [
+          {
+            code: 'CONNECTION_CAPABILITY_RESERVED',
+            message: 'Reserved mutation capabilities cannot be bound',
+            location: `connections.${renderUntrusted(key)}`,
+          },
+        ],
+      }
+    }
+  }
+  return null
+}
+
+function connectionSchemaError(error: z.ZodError, schemaVersion: number): DocumentError | null {
+  const capabilitiesList = error.issues.find(
+    (issue) =>
+      issue.code === 'unrecognized_keys' &&
+      issue.path[0] === 'connections' &&
+      issue.keys.includes('capabilities'),
+  )
+  if (capabilitiesList) {
+    return {
+      code: 'CONNECTION_BINDING_INVALID',
+      message: 'A connection binding must not include a capabilities list',
+      schemaVersion,
+      issues: [
+        {
+          code: 'CONNECTION_BINDING_INVALID',
+          message: 'A connection binding must not include a capabilities list',
+          location: formatLocation(capabilitiesList.path),
+        },
+      ],
+    }
+  }
+  const unknownProvider = error.issues.find(
+    (issue) => issue.path[0] === 'connections' && issue.path.at(-1) === 'provider',
+  )
+  if (unknownProvider) {
+    return {
+      code: 'CONNECTION_PROVIDER_UNKNOWN',
+      message: 'Connection names an unknown provider',
+      schemaVersion,
+      issues: [
+        {
+          code: 'CONNECTION_PROVIDER_UNKNOWN',
+          message: 'Connection names an unknown provider',
+          location: formatLocation(unknownProvider.path),
+        },
+      ],
+    }
+  }
+  const connectionIssue = error.issues.find((issue) => issue.path[0] === 'connections')
+  if (connectionIssue) {
+    return {
+      code: 'CONNECTION_BINDING_INVALID',
+      message: 'Connection binding is invalid',
+      schemaVersion,
+      issues: zodIssues(error, 'CONNECTION_BINDING_INVALID'),
+    }
+  }
+  return null
+}
+
+function interpretConnections(
+  raw: Record<string, ConnectionBinding>,
+): Result<ConnectionMap, DocumentError> {
+  const connections: Record<string, ConnectionBinding> = {}
+  const issues: DocumentIssue[] = []
+  for (const [key, binding] of Object.entries(raw)) {
+    if (!isReadCapabilityId(key)) {
+      issues.push({
+        code: 'CONNECTION_BINDING_INVALID',
+        message: 'Connection key is not an Increment 3 read capability',
+        location: `connections.${renderUntrusted(key)}`,
+      })
+      continue
+    }
+    connections[key] = binding
+    for (const diagnostic of identifierIssues(binding, `connections.${key}`)) {
+      issues.push({
+        code: diagnostic.code,
+        message: diagnostic.message,
+        location: diagnostic.path,
+      })
+    }
+  }
+  if (issues.length > 0) {
+    const code = issues.find((issue) => issue.code === 'CONNECTION_IDENTIFIER_REJECTED')?.code
+    return err({
+      code: code ?? 'CONNECTION_BINDING_INVALID',
+      message: issues[0]?.message ?? 'Connection binding is invalid',
+      schemaVersion: 3,
+      issues,
+    })
+  }
+  return ok(connections)
+}
+
+/** Cross-field rules that JSON Schema cannot express. */
 export function validateConfigSemantics(config: WrkrsConfig): DocumentIssue[] {
   const issues: DocumentIssue[] = []
   const seen = new Set<string>()

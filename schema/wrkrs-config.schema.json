@@ -1,11 +1,11 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "wrkrs configuration (schema version 2)",
+  "title": "wrkrs configuration (schema version 3)",
   "type": "object",
   "properties": {
     "schemaVersion": {
       "type": "number",
-      "const": 2,
+      "const": 3,
       "description": "Configuration schema version."
     },
     "preset": {
@@ -115,15 +115,6 @@
       ],
       "additionalProperties": false
     },
-    "providers": {
-      "type": "object",
-      "propertyNames": {
-        "type": "string",
-        "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"
-      },
-      "additionalProperties": {},
-      "description": "Provider configuration keyed by provider identifier. Secrets are never stored here."
-    },
     "extensions": {
       "type": "object",
       "propertyNames": {
@@ -150,6 +141,110 @@
         "profile"
       ],
       "additionalProperties": false
+    },
+    "connections": {
+      "type": "object",
+      "propertyNames": {
+        "type": "string"
+      },
+      "additionalProperties": {
+        "oneOf": [
+          {
+            "type": "object",
+            "properties": {
+              "provider": {
+                "type": "string",
+                "enum": [
+                  "github",
+                  "linear",
+                  "figma",
+                  "mcp"
+                ]
+              },
+              "kind": {
+                "type": "string",
+                "const": "mcp-server"
+              },
+              "server": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64
+              },
+              "scope": {
+                "type": "string",
+                "enum": [
+                  "project",
+                  "user",
+                  "local",
+                  "cloud"
+                ]
+              },
+              "note": {
+                "type": "string",
+                "maxLength": 120
+              }
+            },
+            "required": [
+              "provider",
+              "kind",
+              "server",
+              "scope"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "provider": {
+                "type": "string",
+                "const": "github"
+              },
+              "kind": {
+                "type": "string",
+                "const": "cli"
+              },
+              "executable": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64
+              },
+              "note": {
+                "type": "string",
+                "maxLength": 120
+              }
+            },
+            "required": [
+              "provider",
+              "kind",
+              "executable"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "provider": {
+                "type": "string",
+                "const": "manual"
+              },
+              "kind": {
+                "type": "string",
+                "const": "manual"
+              },
+              "note": {
+                "type": "string",
+                "maxLength": 120
+              }
+            },
+            "required": [
+              "provider",
+              "kind"
+            ],
+            "additionalProperties": false
+          }
+        ]
+      },
+      "description": "Primary capability bindings. One route per Increment 3 read capability."
     }
   },
   "required": [
@@ -158,9 +253,9 @@
     "runtime",
     "roster",
     "governance",
-    "providers",
     "extensions",
-    "execution"
+    "execution",
+    "connections"
   ],
   "additionalProperties": false,
   "description": "wrkrs repository configuration"

@@ -7,6 +7,7 @@ import { renderCheck, createStyler } from '../../../src/cli/output/human-reporte
 import { checkToJson } from '../../../src/cli/output/json-reporter.js'
 import { runCli } from '../../../src/cli/program.js'
 import { createNonInteractivePrompt } from '../../../src/cli/prompt.js'
+import { createNodeInputDocument } from '../../../src/platform/input-document.js'
 import { applyPreparedInit, prepareInit } from '../../../src/init/init.js'
 import {
   createNodeFileSystem,
@@ -61,6 +62,7 @@ async function cli(args: string[], fs = unsupportedFileSystem().fs) {
       wrkrsVersion: deps.wrkrsVersion,
       ports: createTestPorts({ fs }),
       prompt: createNonInteractivePrompt(),
+      inputDocument: createNodeInputDocument(),
       preset: deps.preset,
       adapters: deps.adapters,
       providers: deps.providers,

@@ -3,7 +3,10 @@
  * runtime source of truth and is type-checked against these interfaces so the
  * core never depends on the validation library.
  */
-export const CONFIG_SCHEMA_VERSION = 2
+import type { ReadCapabilityId } from './capabilities.js'
+import type { ConnectionBinding } from './connections.js'
+
+export const CONFIG_SCHEMA_VERSION = 3
 export const PRESET_ID = 'product-engineering'
 export const PRESET_VERSION = 1
 export const RUNTIME_ID = 'claude-code'
@@ -28,6 +31,8 @@ export interface Execution {
   readonly profile: ExecutionProfile
 }
 
+export type ConnectionMap = Readonly<Partial<Record<ReadCapabilityId, ConnectionBinding>>>
+
 export interface WrkrsConfig {
   readonly schemaVersion: typeof CONFIG_SCHEMA_VERSION
   readonly preset: { readonly id: typeof PRESET_ID; readonly version: number }
@@ -38,7 +43,7 @@ export interface WrkrsConfig {
   }
   readonly governance: Governance
   readonly execution: Execution
-  readonly providers: Readonly<Record<string, unknown>>
+  readonly connections: ConnectionMap
   readonly extensions: Readonly<Record<string, unknown>>
 }
 
@@ -49,6 +54,18 @@ export interface WrkrsConfigV1 {
   readonly runtime: WrkrsConfig['runtime']
   readonly roster: WrkrsConfig['roster']
   readonly governance: Governance
+  readonly providers: Readonly<Record<string, unknown>>
+  readonly extensions: Readonly<Record<string, unknown>>
+}
+
+/** Schema version 2 added execution.profile and still carried providers. */
+export interface WrkrsConfigV2 {
+  readonly schemaVersion: 2
+  readonly preset: WrkrsConfig['preset']
+  readonly runtime: WrkrsConfig['runtime']
+  readonly roster: WrkrsConfig['roster']
+  readonly governance: Governance
+  readonly execution: Execution
   readonly providers: Readonly<Record<string, unknown>>
   readonly extensions: Readonly<Record<string, unknown>>
 }

@@ -7,6 +7,7 @@ import {
   PRESET_ID,
   RUNTIME_ID,
   type ConfiguredRole,
+  type ConnectionMap,
   type WrkrsConfig,
 } from '../core/configuration.js'
 import { WrkrsError } from '../core/errors.js'
@@ -14,14 +15,18 @@ import { sortFindings } from '../core/findings.js'
 import { CONFIG_PATH, MANIFEST_PATH, SCHEMA_PATH } from '../core/ownership.js'
 import type { DesiredComponent, InstallPlan } from '../core/plan.js'
 import type { ClockPort, EnvironmentPort, FileSystemPort, IdPort } from '../core/ports.js'
+import { resolveConnections } from '../core/provider.js'
 import type { ProviderRegistry } from '../core/provider.js'
 import { recommendRoster, type RosterPreset, type RosterRecommendation } from '../core/roster.js'
 import type { CompiledRole } from '../core/runtime-adapter.js'
 import { err, ok, type Result } from '../core/result.js'
+import { isConnectionIdentifier } from '../core/sanitize.js'
 import type { RepositorySnapshot } from '../core/snapshot.js'
 import { MINIMUM_NODE_VERSION, satisfiesMinimumVersion } from '../core/versions.js'
+import { findExecutable } from '../platform/environment.js'
 import type { GitPort } from '../platform/git.js'
 import { buildInitPlan } from '../planner/init-plan.js'
+import { discoverQuestionSet, type QuestionSet } from './questions.js'
 import { compilePortableRoles } from '../presets/product-engineering/index.js'
 import { analyzeRepository, snapshotTargets, type AnalyzeOptions } from '../repository/analyze.js'
 import { locateRepository, type LocatedRepository, type LocateError } from '../repository/locate.js'
@@ -52,6 +57,16 @@ export interface PreparedInit {
   readonly plan: InstallPlan
 }
 
+export interface InitRequest {
+  readonly connections?: ConnectionMap
+}
+
+export interface DiscoveredInit {
+  readonly repository: LocatedRepository
+  readonly snapshot: RepositorySnapshot
+  readonly questionSet: QuestionSet
+}
+
 const CORE_COMPONENT = 'wrkrs'
 const CORE_SOURCE_VERSION = 1
 
@@ -71,7 +86,10 @@ export function locateErrorToWrkrsError(error: LocateError): WrkrsError {
 }
 
 /** Builds the seeded configuration from a roster recommendation. */
-export function buildConfig(roster: RosterRecommendation): WrkrsConfig {
+export function buildConfig(
+  roster: RosterRecommendation,
+  connections: ConnectionMap = {},
+): WrkrsConfig {
   const roles: ConfiguredRole[] = roster.roles.map((role) => {
     const isSpecializable = role.id === 'software-engineer'
     return isSpecializable
@@ -94,7 +112,7 @@ export function buildConfig(roster: RosterRecommendation): WrkrsConfig {
       requireExplicitReleaseApproval: true,
     },
     execution: { profile: 'adaptive' },
-    providers: {},
+    connections,
     extensions: {},
   }
 }
@@ -139,16 +157,22 @@ export function compileCoreComponents(
   ]
 }
 
-/**
- * Steps 0-6 of the init flow: preflight, locate, read-only scan, findings,
- * roster recommendation, desired-state compilation, and planning. Performs
- * no write beneath the repository.
- */
-export async function prepareInit(
+export async function connectionEvidence(
+  snapshot: RepositorySnapshot,
+  ports: InitPorts,
+): Promise<{ projectServers: readonly string[]; cliPresent: boolean }> {
+  const projectServers = (snapshot.claude.mcp?.servers.map((server) => server.name) ?? []).filter(
+    isConnectionIdentifier,
+  )
+  const gh = await findExecutable('gh', ports.environment, ports.fs)
+  return { projectServers, cliPresent: gh !== null }
+}
+
+async function preflight(
   cwd: string,
   dependencies: InitDependencies,
   ports: InitPorts,
-): Promise<Result<PreparedInit, WrkrsError>> {
+): Promise<Result<{ repository: LocatedRepository; snapshot: RepositorySnapshot }, WrkrsError>> {
   if (!satisfiesMinimumVersion(ports.environment.nodeVersion, MINIMUM_NODE_VERSION)) {
     return err(
       new WrkrsError(
@@ -163,7 +187,6 @@ export async function prepareInit(
     return err(new WrkrsError('ENV_GIT_MISSING', gitVersion.error.message))
   }
   if (!ports.fs.containment.supported) {
-    // Fail closed before any repository content is located or scanned.
     return err(
       new WrkrsError(
         'ENVIRONMENT_CONTAINMENT_UNSUPPORTED',
@@ -176,10 +199,50 @@ export async function prepareInit(
   if (!located.ok) {
     return err(locateErrorToWrkrsError(located.error))
   }
-  const repository = located.value
-  const scanned = await analyzeRepository(repository, ports.fs, dependencies.analyzeOptions ?? {})
+  const snapshot = await analyzeRepository(
+    located.value,
+    ports.fs,
+    dependencies.analyzeOptions ?? {},
+  )
+  return ok({ repository: located.value, snapshot })
+}
+
+export async function discoverInitQuestions(
+  cwd: string,
+  dependencies: InitDependencies,
+  ports: InitPorts,
+): Promise<Result<DiscoveredInit, WrkrsError>> {
+  const ready = await preflight(cwd, dependencies, ports)
+  if (!ready.ok) return ready
+  const evidence = await connectionEvidence(ready.value.snapshot, ports)
+  return ok({
+    repository: ready.value.repository,
+    snapshot: ready.value.snapshot,
+    questionSet: discoverQuestionSet({
+      providers: dependencies.providers,
+      projectServers: evidence.projectServers,
+      cliPresent: evidence.cliPresent,
+    }),
+  })
+}
+
+/**
+ * Steps 0-6 of the init flow: preflight, locate, read-only scan, findings,
+ * roster recommendation, desired-state compilation, and planning. Performs
+ * no write beneath the repository.
+ */
+export async function prepareInit(
+  cwd: string,
+  dependencies: InitDependencies,
+  ports: InitPorts,
+  request: InitRequest = {},
+): Promise<Result<PreparedInit, WrkrsError>> {
+  const ready = await preflight(cwd, dependencies, ports)
+  if (!ready.ok) return ready
+  const { repository } = ready.value
+  const scanned = ready.value.snapshot
   const roster = recommendRoster(dependencies.preset, scanned.projectSignals)
-  const config = buildConfig(roster)
+  const config = buildConfig(roster, request.connections ?? {})
 
   const adapter = dependencies.adapters.get(config.runtime.primary)
   if (!adapter) {
@@ -190,22 +253,18 @@ export async function prepareInit(
       ),
     )
   }
+  const evidence = await connectionEvidence(scanned, ports)
+  const resolved = resolveConnections(config.connections, dependencies.providers, {
+    projectServers: new Set(evidence.projectServers),
+    cliExecutables: new Set(evidence.cliPresent ? ['gh'] : []),
+  })
   const roles = compilePortableRoles(roster, config.execution)
   const analysis = adapter.analyze(scanned)
   const desired: DesiredComponent[] = [
     ...compileCoreComponents(config, roles),
-    ...adapter.compile({ roster, config, roles }),
+    ...adapter.compile({ roster, config, roles, connections: resolved.resolved }),
   ]
-  for (const providerId of Object.keys(config.providers).sort()) {
-    const provider = dependencies.providers.get(providerId)
-    if (!provider) continue
-    desired.push(
-      ...provider.planConfiguration({ config, providerConfig: config.providers[providerId] }),
-    )
-  }
 
-  // Every desired target (from the core, the runtime adapter, and any provider)
-  // is snapshotted exactly, independently of the bounded generic index.
   const snapshot = await snapshotTargets(
     scanned,
     [...desired.map((component) => component.path), MANIFEST_PATH],

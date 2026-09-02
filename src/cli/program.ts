@@ -40,13 +40,38 @@ function buildProgram(options: RunCliOptions, exit: { code: number }): Command {
     .option('--dry-run', 'show the plan and diffs without writing anything', false)
     .option('-y, --yes', 'apply without an interactive confirmation', false)
     .option('--json', 'emit the semantic plan and result as JSON (no terminal styling)', false)
+    .option(
+      '--questions',
+      'emit the setup question set and questionSetDigest; write nothing',
+      false,
+    )
+    .option('--answers <file>', 'apply bindings from a versioned answers document')
+    .option('--expect-digest <digest>', 'require this plan digest before applying')
     .option('--cwd <directory>', 'directory inside the target Git worktree', options.defaultCwd)
-    .action(async (flags: { dryRun: boolean; yes: boolean; json: boolean; cwd: string }) => {
-      exit.code = await runInitCommand(
-        { dryRun: flags.dryRun, yes: flags.yes, json: flags.json, cwd: flags.cwd },
-        context(flags.json),
-      )
-    })
+    .action(
+      async (flags: {
+        dryRun: boolean
+        yes: boolean
+        json: boolean
+        questions: boolean
+        answers?: string
+        expectDigest?: string
+        cwd: string
+      }) => {
+        exit.code = await runInitCommand(
+          {
+            dryRun: flags.dryRun,
+            yes: flags.yes,
+            json: flags.json,
+            questions: flags.questions,
+            answers: flags.answers,
+            expectDigest: flags.expectDigest,
+            cwd: flags.cwd,
+          },
+          context(flags.json || flags.questions),
+        )
+      },
+    )
 
   program
     .command('update')

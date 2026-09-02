@@ -1,5 +1,5 @@
 import type { RuntimeAdapterRegistry } from '../adapters/registry.js'
-import type { PromptPort } from '../core/ports.js'
+import type { InputDocumentPort, PromptPort } from '../core/ports.js'
 import type { ProviderRegistry } from '../core/provider.js'
 import type { RosterPreset } from '../core/roster.js'
 import type { InitPorts } from '../init/init.js'
@@ -9,6 +9,7 @@ export interface CliServices {
   readonly wrkrsVersion: string
   readonly ports: InitPorts
   readonly prompt: PromptPort
+  readonly inputDocument: InputDocumentPort
   readonly preset: RosterPreset
   readonly adapters: RuntimeAdapterRegistry
   readonly providers: ProviderRegistry

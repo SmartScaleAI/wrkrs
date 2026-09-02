@@ -9,6 +9,7 @@ import { createStyler, renderCheck, renderPlan } from '../../../src/cli/output/h
 import { checkToJson, planToJson } from '../../../src/cli/output/json-reporter.js'
 import { runCli } from '../../../src/cli/program.js'
 import { createNonInteractivePrompt } from '../../../src/cli/prompt.js'
+import { createNodeInputDocument } from '../../../src/platform/input-document.js'
 import {
   parseConfigDocument,
   parseJournalDocument,
@@ -162,6 +163,7 @@ describe('parser diagnostics are sanitized', () => {
         wrkrsVersion: deps.wrkrsVersion,
         ports: { ...createTestPorts(), git: throwing },
         prompt: createNonInteractivePrompt(),
+        inputDocument: createNodeInputDocument(),
         preset: deps.preset,
         adapters: deps.adapters,
         providers: deps.providers,

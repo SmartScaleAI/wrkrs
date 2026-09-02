@@ -193,10 +193,20 @@ describe('compiled CLI', () => {
     expect(entries).not.toContain('CLAUDE.md')
     expect(entries).not.toContain('.claude/settings.json')
     expect(entries).not.toContain('.mcp.json')
+    const mcpBefore = before.find((entry) => entry.path === '.mcp.json')
+    const mcpAfter = after.find((entry) => entry.path === '.mcp.json')
+    expect(mcpAfter).toEqual(mcpBefore)
 
     const check = await runCompiledCli(['check', '--json'], { cwd: root })
     expect(check.code).toBe(0)
     expect(check.stdout).not.toContain(SECRET_SENTINEL)
+
+    const updated = await runCompiledCli(['update', '--yes', '--json'], { cwd: root })
+    expect(updated.code).toBe(0)
+    expect(readTree(root).find((entry) => entry.path === '.mcp.json')).toEqual(mcpBefore)
+    const removed = await runCompiledCli(['uninstall', '--yes', '--json'], { cwd: root })
+    expect(removed.code).toBe(0)
+    expect(readTree(root).find((entry) => entry.path === '.mcp.json')).toEqual(mcpBefore)
   })
 
   it('blocks namespaced collisions and symlinks without writing', async () => {

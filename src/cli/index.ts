@@ -9,7 +9,8 @@ import { systemIds } from '../platform/ids.js'
 import { readPackageInfo } from '../platform/package-info.js'
 import { createNodeProcess } from '../platform/process.js'
 import { productEngineeringPreset } from '../presets/product-engineering/index.js'
-import { createProviderRegistry } from '../providers/registry.js'
+import { createBuiltinProviderRegistry } from '../providers/index.js'
+import { createNodeInputDocument } from '../platform/input-document.js'
 import { runCli } from './program.js'
 import { createReadlinePrompt } from './prompt.js'
 
@@ -30,9 +31,10 @@ const code = await runCli(process.argv.slice(2), {
       environment: createNodeEnvironment(),
     },
     prompt: createReadlinePrompt({ input: process.stdin, output: process.stdout, interactive }),
+    inputDocument: createNodeInputDocument(),
     preset: productEngineeringPreset,
     adapters: createRuntimeAdapterRegistry([createClaudeCodeAdapter()]),
-    providers: createProviderRegistry([]),
+    providers: createBuiltinProviderRegistry(),
   },
   streams: { stdout: process.stdout, stderr: process.stderr },
   colors,

@@ -30,7 +30,7 @@ export const configRoleSchema = z.strictObject({
     .describe('Task-specific specializations attached to this role.'),
 })
 
-const configBody = {
+const sharedConfigBody = {
   preset: z.strictObject({
     id: z.literal('product-engineering').describe('Framework preset identifier.'),
     version: z.int().positive().describe('Preset version the roster was generated from.'),
@@ -48,21 +48,50 @@ const configBody = {
     requireOwnerTestForUserFacingOrNativeWork: z.boolean(),
     requireExplicitReleaseApproval: z.boolean(),
   }),
-  providers: z
-    .record(identifier, z.unknown())
-    .describe(
-      'Provider configuration keyed by provider identifier. Secrets are never stored here.',
-    ),
   extensions: z
     .record(z.string(), z.unknown())
     .describe('Explicit extension data preserved by wrkrs but not interpreted by it.'),
 }
 
+const legacyProviders = z
+  .record(z.string(), z.unknown())
+  .describe('Legacy provider map. Empty records migrate to connections; non-empty records block.')
+
+const connectionNote = z.string().max(120).optional()
+
+const mcpServerBindingSchema = z.strictObject({
+  provider: z.enum(['github', 'linear', 'figma', 'mcp']),
+  kind: z.literal('mcp-server'),
+  server: z.string().min(1).max(64),
+  scope: z.enum(['project', 'user', 'local', 'cloud']),
+  note: connectionNote,
+})
+
+const cliBindingSchema = z.strictObject({
+  provider: z.literal('github'),
+  kind: z.literal('cli'),
+  executable: z.string().min(1).max(64),
+  note: connectionNote,
+})
+
+const manualBindingSchema = z.strictObject({
+  provider: z.literal('manual'),
+  kind: z.literal('manual'),
+  note: connectionNote,
+})
+
+export const connectionBindingSchema = z.discriminatedUnion('kind', [
+  mcpServerBindingSchema,
+  cliBindingSchema,
+  manualBindingSchema,
+])
+
 /** Version 1: the first durable format. Read for migration; never written again. */
 export const configSchemaV1 = z
   .strictObject({
     schemaVersion: z.literal(1).describe('Configuration schema version.'),
-    ...configBody,
+    ...sharedConfigBody,
+    providers: legacyProviders,
   })
   .describe('wrkrs repository configuration (schema version 1)')
 
@@ -70,7 +99,7 @@ export const configSchemaV1 = z
 export const configSchemaV2 = z
   .strictObject({
     schemaVersion: z.literal(2).describe('Configuration schema version.'),
-    ...configBody,
+    ...sharedConfigBody,
     execution: z.strictObject({
       profile: z
         .enum(EXECUTION_PROFILES)
@@ -78,6 +107,25 @@ export const configSchemaV2 = z
           'Execution profile floor: adaptive lets the Product Manager triage; fast, standard, and full set a floor that may be raised and never lowered.',
         ),
     }),
+    providers: legacyProviders,
+  })
+  .describe('wrkrs repository configuration (schema version 2)')
+
+/** Version 3 replaces providers with capability-keyed connections. */
+export const configSchemaV3 = z
+  .strictObject({
+    schemaVersion: z.literal(3).describe('Configuration schema version.'),
+    ...sharedConfigBody,
+    execution: z.strictObject({
+      profile: z
+        .enum(EXECUTION_PROFILES)
+        .describe(
+          'Execution profile floor: adaptive lets the Product Manager triage; fast, standard, and full set a floor that may be raised and never lowered.',
+        ),
+    }),
+    connections: z
+      .record(z.string(), connectionBindingSchema)
+      .describe('Primary capability bindings. One route per Increment 3 read capability.'),
   })
   .describe('wrkrs repository configuration')
 
@@ -168,7 +216,7 @@ export const journalSchemaV1 = z.strictObject({
 // Compile-time guarantees that the runtime schemas produce the core contracts.
 type Extends<A, B> = A extends B ? true : false
 type Assert<T extends true> = T
-export type ConfigSchemaMatchesCore = Assert<Extends<z.output<typeof configSchemaV2>, WrkrsConfig>>
+export type ConfigSchemaMatchesCore = Assert<Extends<z.output<typeof configSchemaV3>, WrkrsConfig>>
 export type ManifestSchemaMatchesCore = Assert<
   Extends<z.output<typeof manifestSchemaV2>, OwnershipManifest>
 >

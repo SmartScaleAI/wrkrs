@@ -1,4 +1,5 @@
 import type { WrkrsConfig } from './configuration.js'
+import type { ResolvedBinding } from './connections.js'
 import type { Diagnostic } from './diagnostics.js'
 import type { Finding } from './findings.js'
 import type { OwnershipManifest } from './ownership.js'
@@ -29,6 +30,7 @@ export interface AdapterCompileInput {
   readonly roster: RosterRecommendation
   readonly config: WrkrsConfig
   readonly roles: readonly CompiledRole[]
+  readonly connections?: readonly ResolvedBinding[]
 }
 
 export interface AdapterValidationContext {

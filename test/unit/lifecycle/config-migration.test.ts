@@ -49,20 +49,23 @@ function codes(report: CheckReport): string[] {
   return report.diagnostics.map((diagnostic) => diagnostic.code)
 }
 
-function demoteInstalledConfig(root: string): string {
+function demoteInstalledConfig(root: string, to: 1 | 2 = 1): string {
   const file = path.join(root, CONFIG_PATH)
   const current = readFileSync(file, 'utf8')
-  const v1 = current
-    .replace('schema version 2', 'schema version 1')
-    .replace('schemaVersion: 2', 'schemaVersion: 1')
-    .replace(/\nexecution:\n  profile: adaptive\n/, '\n')
+  let demoted = current
+    .replace('schema version 3', `schema version ${to}`)
+    .replace('schemaVersion: 3', `schemaVersion: ${to}`)
+    .replace(/\nconnections: \{\}\n/, '\nproviders: {}\n')
     .replace('\ngovernance:', '\n# keep-this-comment\ngovernance:')
-  writeFileSync(file, v1)
-  return v1
+  if (to === 1) {
+    demoted = demoted.replace(/\nexecution:\n  profile: adaptive\n/, '\n')
+  }
+  writeFileSync(file, demoted)
+  return demoted
 }
 
 describe('configuration schema v2 migration through check and update', () => {
-  it('113: check reports a version 1 configuration as migratable and rewrites no byte', async () => {
+  it('113: check reports a version 1 and a version 2 configuration as migratable and rewrites no byte', async () => {
     const { root, ports } = await install()
     const legacy = demoteInstalledConfig(root)
     const before = hashTree(root)
@@ -78,6 +81,15 @@ describe('configuration schema v2 migration through check and update', () => {
     expect(diagnostic?.remediation).toContain('check never migrates')
     expect(readFileSync(path.join(root, CONFIG_PATH), 'utf8')).toBe(legacy)
     expect(hashTree(root)).toBe(before)
+
+    const again = await install()
+    const v2 = demoteInstalledConfig(again.root, 2)
+    const beforeV2 = hashTree(again.root)
+    const reportV2 = await check(again.root, again.ports)
+    expect(codes(reportV2)).toContain('CONFIG_MIGRATION_AVAILABLE')
+    expect(reportV2.summary.errors).toBe(0)
+    expect(readFileSync(path.join(again.root, CONFIG_PATH), 'utf8')).toBe(v2)
+    expect(hashTree(again.root)).toBe(beforeV2)
   })
 
   it('118: update --dry-run on an unmigrated configuration shows the migration diff and writes nothing', async () => {
@@ -93,8 +105,9 @@ describe('configuration schema v2 migration through check and update', () => {
     const proposed = operation?.proposedBytes
       ? new TextDecoder().decode(operation.proposedBytes)
       : ''
-    expect(proposed).toContain('schemaVersion: 2')
+    expect(proposed).toContain('schemaVersion: 3')
     expect(proposed).toContain('profile: adaptive')
+    expect(proposed).toContain('connections:')
     expect(proposed).toContain('# keep-this-comment')
     expect(hashTree(root)).toBe(before)
     expect(readFileSync(path.join(root, CONFIG_PATH), 'utf8')).toBe(legacy)
@@ -114,7 +127,7 @@ describe('configuration schema v2 migration through check and update', () => {
     const parsed = parseConfigDocument(applied)
     expect(parsed.ok).toBe(true)
     if (!parsed.ok) return
-    expect(parsed.value.sourceSchemaVersion).toBe(2)
+    expect(parsed.value.sourceSchemaVersion).toBe(3)
     expect(parsed.value.config.execution.profile).toBe('adaptive')
     expect(codes(await check(root, ports))).not.toContain('CONFIG_MIGRATION_AVAILABLE')
 

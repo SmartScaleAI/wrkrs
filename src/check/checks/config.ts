@@ -118,22 +118,6 @@ export async function checkConfig(context: CheckContext): Promise<Diagnostic[]> 
       ),
     )
   }
-  for (const providerId of Object.keys(config.providers).sort()) {
-    if (!context.providers.get(providerId)) {
-      diagnostics.push(
-        createDiagnostic(
-          'CONFIG_PROVIDER_UNKNOWN',
-          'warning',
-          `Provider "${providerId}" is configured but not available in this wrkrs version`,
-          {
-            path: CONFIG_PATH,
-            remediation: 'Remove the provider entry or upgrade wrkrs when the provider ships',
-            details: { provider: providerId },
-          },
-        ),
-      )
-    }
-  }
 
   for (const role of config.roster.roles) {
     const roleResolved = await context.reader.resolve(role.source)

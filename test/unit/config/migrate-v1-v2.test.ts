@@ -6,7 +6,7 @@ import { serializeConfig } from '../../../src/config/serialize.js'
 import type { WrkrsConfig } from '../../../src/core/configuration.js'
 
 const base: WrkrsConfig = {
-  schemaVersion: 2,
+  schemaVersion: 3,
   preset: { id: 'product-engineering', version: 1 },
   runtime: { primary: 'claude-code' },
   roster: {
@@ -20,15 +20,16 @@ const base: WrkrsConfig = {
     requireExplicitReleaseApproval: true,
   },
   execution: { profile: 'adaptive' },
-  providers: {},
+  connections: {},
   extensions: {},
 }
 
 function v1FromCurrent(text: string): string {
   return text
-    .replace('schema version 2', 'schema version 1')
-    .replace('schemaVersion: 2', 'schemaVersion: 1')
+    .replace('schema version 3', 'schema version 1')
+    .replace('schemaVersion: 3', 'schemaVersion: 1')
     .replace(/\nexecution:\n  profile: adaptive\n/, '\n')
+    .replace(/\nconnections: \{\}\n/, '\nproviders: {}\n')
 }
 
 describe('comment-preserving config v1 → v2 migration', () => {
@@ -47,9 +48,9 @@ describe('comment-preserving config v1 → v2 migration', () => {
     expect(parsed.ok).toBe(true)
     if (!parsed.ok) return
     expect(parsed.value.sourceSchemaVersion).toBe(2)
-    expect(parsed.value.migrated).toBe(false)
+    expect(parsed.value.migrated).toBe(true)
     expect(parsed.value.config.execution.profile).toBe('adaptive')
-    expect(parsed.value.config.schemaVersion).toBe(2)
+    expect(parsed.value.config.schemaVersion).toBe(3)
   })
 
   it('114: preserves owner comments, key order, blank lines, and extensions; only migrated keys differ', () => {

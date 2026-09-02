@@ -5,6 +5,7 @@ import type {
   ClaudeSnapshot,
   McpSnapshot,
 } from '../../core/snapshot.js'
+import { isConnectionIdentifier } from '../../core/sanitize.js'
 import { joinRelativePath } from '../../platform/paths.js'
 import type { ScanContext } from '../snapshot.js'
 
@@ -107,6 +108,7 @@ async function readMcp(context: ScanContext, path: string): Promise<McpSnapshot 
   const result: { name: string; transport: string }[] = []
   if (isRecord(servers)) {
     for (const name of Object.keys(servers).sort()) {
+      if (!isConnectionIdentifier(name)) continue
       const server = servers[name]
       let transport = 'unknown'
       if (isRecord(server)) {

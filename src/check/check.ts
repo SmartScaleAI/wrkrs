@@ -13,6 +13,7 @@ import type { GitPort } from '../platform/git.js'
 import { locateRepository, type LocateError } from '../repository/locate.js'
 import { checkAdapter } from './checks/adapter.js'
 import { checkConfig } from './checks/config.js'
+import { checkConnections } from './checks/connections.js'
 import { checkEnvironment } from './checks/environment.js'
 import { checkManifest } from './checks/manifest.js'
 import { checkOwnership } from './checks/ownership.js'
@@ -120,6 +121,7 @@ export async function runCheck(input: CheckInput, ports: CheckPorts): Promise<Ch
   // deliberately.
   diagnostics.push(...(await checkManifest(context)))
   diagnostics.push(...(await checkConfig(context)))
+  diagnostics.push(...(await checkConnections(context)))
   diagnostics.push(...(await checkOwnership(context)))
   diagnostics.push(...(await checkTransaction(context)))
   diagnostics.push(...(await checkAdapter(context)))

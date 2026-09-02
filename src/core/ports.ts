@@ -4,6 +4,8 @@
  * fault injectors, fixed clocks, and sequential identifiers.
  */
 
+import type { Result } from './result.js'
+
 export type FileKind = 'file' | 'directory' | 'symlink' | 'other'
 
 export interface FileStat {
@@ -212,9 +214,41 @@ export interface IdPort {
   uuid(): string
 }
 
+export interface PromptChoice {
+  readonly id: string
+  readonly label: string
+}
+
 export interface PromptPort {
   readonly interactive: boolean
   confirm(message: string): Promise<boolean>
+  /** Returns a choice id, or null when cancelled. Non-interactive implementations return the default. */
+  choose(
+    message: string,
+    choices: readonly PromptChoice[],
+    defaultId: string,
+  ): Promise<string | null>
+}
+
+export interface InputDocumentError {
+  readonly code: string
+  readonly message: string
+}
+
+export interface InputDocument {
+  readonly bytes: Uint8Array
+}
+
+/**
+ * Read-only access to an explicitly supplied input document such as `--answers`.
+ * This is not the repository filesystem port: absolute paths and paths outside
+ * the worktree are allowed. wrkrs never writes through this port.
+ */
+export interface InputDocumentPort {
+  read(
+    path: string,
+    options: { cwd: string; maxBytes: number },
+  ): Promise<Result<InputDocument, InputDocumentError>>
 }
 
 export interface EnvironmentPort {

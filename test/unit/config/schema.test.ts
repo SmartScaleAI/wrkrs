@@ -15,7 +15,7 @@ import type { OwnershipManifest } from '../../../src/core/ownership.js'
 import { REPOSITORY_ROOT } from '../../helpers/temp.js'
 
 const validConfig: WrkrsConfig = {
-  schemaVersion: 2,
+  schemaVersion: 3,
   preset: { id: 'product-engineering', version: 1 },
   runtime: { primary: 'claude-code' },
   roster: {
@@ -36,7 +36,7 @@ const validConfig: WrkrsConfig = {
     requireExplicitReleaseApproval: true,
   },
   execution: { profile: 'adaptive' },
-  providers: {},
+  connections: {},
   extensions: {},
 }
 
@@ -49,13 +49,12 @@ describe('JSON schema', () => {
     expect(renderConfigJsonSchema()).toBe(committed)
   })
 
-  it('is strict at the root and open only for providers and extensions', () => {
+  it('is strict at the root and open only for extensions', () => {
     const schema = JSON.parse(renderConfigJsonSchema()) as {
       additionalProperties: boolean
       properties: Record<string, { additionalProperties?: unknown }>
     }
     expect(schema.additionalProperties).toBe(false)
-    expect(schema.properties['providers']?.additionalProperties).toEqual({})
     expect(schema.properties['extensions']?.additionalProperties).toEqual({})
   })
 })
@@ -68,7 +67,7 @@ describe('config loading', () => {
     const parsed = parseConfigDocument(text)
     expect(parsed).toEqual({
       ok: true,
-      value: { config: validConfig, sourceSchemaVersion: 2, migrated: false },
+      value: { config: validConfig, sourceSchemaVersion: 3, migrated: false },
     })
   })
 
@@ -148,16 +147,18 @@ describe('config loading', () => {
     if (!rejected.ok) expect(rejected.error.code).toBe('CONFIG_INVALID')
 
     const v1 = serializeConfig(validConfig)
-      .replace('schema version 2', 'schema version 1')
-      .replace('schemaVersion: 2', 'schemaVersion: 1')
+      .replace('schema version 3', 'schema version 1')
+      .replace('schemaVersion: 3', 'schemaVersion: 1')
       .replace(/\nexecution:\n  profile: adaptive\n/, '\n')
+      .replace(/\nconnections: \{\}\n/, '\nproviders: {}\n')
     const migrated = parseConfigDocument(v1)
     expect(migrated.ok).toBe(true)
     if (!migrated.ok) return
     expect(migrated.value.sourceSchemaVersion).toBe(1)
     expect(migrated.value.migrated).toBe(true)
-    expect(migrated.value.config.schemaVersion).toBe(2)
+    expect(migrated.value.config.schemaVersion).toBe(3)
     expect(migrated.value.config.execution.profile).toBe('adaptive')
+    expect(migrated.value.config.connections).toEqual({})
   })
 })
 

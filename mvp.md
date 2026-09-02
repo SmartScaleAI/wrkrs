@@ -1,6 +1,6 @@
 # wrkrs MVP
 
-Status: Locked product scope; first and second increments approved and implemented; third increment plan approved by the owner on 2026-09-01 (decisions.md A-024); Increment 3A implemented; Increment 3B implementation approved by the owner on 2026-09-02  
+Status: Locked product scope; first and second increments approved and implemented; third increment plan approved by the owner on 2026-09-01 (decisions.md A-024); Increments 3A and 3B implemented  
 Last updated: 2026-09-02
 
 ## Product statement
@@ -660,7 +660,7 @@ Deliberately deferred, unchanged from the approved scope: `--force` uninstall, f
 
 ## Third increment: adaptive execution and capability bindings
 
-Status: Plan approved by the owner on 2026-09-01 (decisions.md A-022, A-023, A-024). Increment 3A is implemented. Increment 3B implementation was approved by the owner on 2026-09-02.  
+Status: Plan approved by the owner on 2026-09-01 (decisions.md A-022, A-023, A-024). Increments 3A and 3B are implemented.  
 Date proposed: 2026-09-01
 
 ### Goal

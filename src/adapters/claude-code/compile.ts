@@ -1,6 +1,8 @@
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 
+import { READ_CAPABILITY_IDS } from '../../core/capabilities.js'
+import type { ResolvedBinding } from '../../core/connections.js'
 import { stripFrontmatter } from '../../core/frontmatter.js'
 import type { DesiredComponent } from '../../core/plan.js'
 import type { AdapterCompileInput } from '../../core/runtime-adapter.js'
@@ -32,6 +34,39 @@ function describeGovernance(input: AdapterCompileInput): string {
   return parts.join('; ')
 }
 
+function describeConnections(resolved: readonly ResolvedBinding[]): {
+  readonly section: string
+  readonly summary: string
+} {
+  const byCapability = new Map(resolved.map((item) => [item.capability, item] as const))
+  const lines: string[] = ['## Connections', '']
+  const summaryParts: string[] = []
+  for (const capability of READ_CAPABILITY_IDS) {
+    const item = byCapability.get(capability)
+    if (!item) {
+      lines.push(`- \`${capability}\`: unbound`)
+      summaryParts.push(`${capability} unbound`)
+      continue
+    }
+    const binding = item.binding
+    const target =
+      binding.kind === 'mcp-server'
+        ? `mcp-server ${binding.server}, scope ${binding.scope}`
+        : binding.kind === 'cli'
+          ? `cli ${binding.executable}`
+          : 'manual'
+    lines.push(`- \`${capability}\`: ${binding.provider}, ${target}, ${item.verification}`)
+    summaryParts.push(`${capability} via ${binding.provider} (${item.verification})`)
+  }
+  lines.push('')
+  lines.push('Reserved mutation capabilities are not bindable and are not listed.')
+  lines.push('')
+  return {
+    section: lines.join('\n'),
+    summary: `Connections: ${summaryParts.join('; ')}.`,
+  }
+}
+
 function rosterList(input: AdapterCompileInput): string {
   return input.roster.roles
     .map((role) => `\`${agentName(role.id)}\`${role.primary ? ' (primary)' : ''}`)
@@ -48,6 +83,7 @@ export function compileClaudeCodeComponents(input: AdapterCompileInput): Desired
   const skillTemplate = loadTemplate('skills/SKILL.md')
   const roster = rosterList(input)
   const governance = describeGovernance(input)
+  const connections = describeConnections(input.connections ?? [])
   const components: DesiredComponent[] = []
 
   for (const role of input.roster.roles) {
@@ -71,6 +107,7 @@ export function compileClaudeCodeComponents(input: AdapterCompileInput): Desired
       rosterList: roster,
       governance,
       executionProfile: input.config.execution.profile,
+      connectionsSection: connections.section,
     })
     components.push({
       path: agentPath(role.id),
@@ -89,6 +126,7 @@ export function compileClaudeCodeComponents(input: AdapterCompileInput): Desired
       primaryAgent: agentName(input.roster.primaryRoleId),
       rosterList: roster,
       executionProfile: input.config.execution.profile,
+      connectionsSummary: connections.summary,
     }),
     management: 'managed',
     sourceId: SKILL_SOURCE_ID,

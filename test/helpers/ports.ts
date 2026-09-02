@@ -9,7 +9,7 @@ import { createGit } from '../../src/platform/git.js'
 import { createSequentialIds } from '../../src/platform/ids.js'
 import { createNodeProcess } from '../../src/platform/process.js'
 import { productEngineeringPreset } from '../../src/presets/product-engineering/index.js'
-import { createProviderRegistry } from '../../src/providers/registry.js'
+import { createBuiltinProviderRegistry } from '../../src/providers/index.js'
 
 export const TEST_VERSION = '0.1.0-test'
 export const FIXED_TIME = '2026-08-29T12:00:00.000Z'
@@ -36,7 +36,7 @@ export function createTestDependencies(
     wrkrsVersion: TEST_VERSION,
     preset: productEngineeringPreset,
     adapters: createRuntimeAdapterRegistry([createClaudeCodeAdapter()]),
-    providers: createProviderRegistry([]),
+    providers: createBuiltinProviderRegistry(),
     ...overrides,
   }
 }

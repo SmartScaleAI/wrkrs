@@ -1,15 +1,18 @@
 import { runCheck } from '../check/check.js'
 import { serializeConfig } from '../config/serialize.js'
-import { migrateConfigDocumentV1ToV2 } from '../config/migrations/index.js'
+import { migrateConfigDocumentToCurrent } from '../config/migrations/index.js'
 import { CONFIG_SCHEMA_VERSION } from '../core/configuration.js'
 import { WrkrsError } from '../core/errors.js'
 import { createFinding, sortFindings, type Finding } from '../core/findings.js'
 import { CONFIG_PATH, MANIFEST_PATH } from '../core/ownership.js'
 import type { DesiredComponent, InstallPlan } from '../core/plan.js'
+import { resolveConnections } from '../core/provider.js'
+import { isConnectionIdentifier } from '../core/sanitize.js'
 import { err, ok, type Result } from '../core/result.js'
 import type { RosterRecommendation } from '../core/roster.js'
 import { compileCoreComponents, type InitDependencies, type InitPorts } from '../init/init.js'
 import { buildUpdatePlan } from '../planner/lifecycle-plan.js'
+import { findExecutable } from '../platform/environment.js'
 import { compilePortableRoles } from '../presets/product-engineering/index.js'
 import { snapshotTargets } from '../repository/analyze.js'
 import { applyPlan, type ApplyResult } from '../writer/transaction.js'
@@ -63,6 +66,14 @@ export async function prepareUpdate(
   }
 
   const roles = compilePortableRoles(roster.value, config.execution)
+  const gh = await findExecutable('gh', ports.environment, ports.fs)
+  const projectServers = (
+    installation.snapshot.claude.mcp?.servers.map((server) => server.name) ?? []
+  ).filter(isConnectionIdentifier)
+  const resolved = resolveConnections(config.connections, dependencies.providers, {
+    projectServers: new Set(projectServers),
+    cliExecutables: new Set(gh ? ['gh'] : []),
+  })
   let configYaml = serializeConfig(config)
   let schemaMigration: true | undefined
   if (
@@ -70,9 +81,16 @@ export async function prepareUpdate(
     installation.configSourceSchemaVersion < CONFIG_SCHEMA_VERSION &&
     installation.configSourceText !== null
   ) {
-    const migrated = migrateConfigDocumentV1ToV2(installation.configSourceText)
+    const migrated = migrateConfigDocumentToCurrent(
+      installation.configSourceText,
+      installation.configSourceSchemaVersion,
+    )
     if (!migrated.ok) {
-      return err(new WrkrsError(migrated.error.code, migrated.error.message))
+      return err(
+        new WrkrsError(migrated.error.code, migrated.error.message, {
+          details: migrated.error.details ?? {},
+        }),
+      )
     }
     configYaml = migrated.value
     schemaMigration = true
@@ -83,15 +101,13 @@ export async function prepareUpdate(
       roles,
       schemaMigration ? { configYaml, schemaMigration } : { configYaml },
     ),
-    ...adapter.compile({ roster: roster.value, config, roles }),
+    ...adapter.compile({
+      roster: roster.value,
+      config,
+      roles,
+      connections: resolved.resolved,
+    }),
   ]
-  for (const providerId of Object.keys(config.providers).sort()) {
-    const provider = dependencies.providers.get(providerId)
-    if (!provider) continue
-    desired.push(
-      ...provider.planConfiguration({ config, providerConfig: config.providers[providerId] }),
-    )
-  }
 
   const touched = [
     ...desired.map((component) => component.path),
