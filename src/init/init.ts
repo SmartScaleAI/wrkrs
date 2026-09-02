@@ -10,6 +10,7 @@ import {
   type ConnectionMap,
   type WrkrsConfig,
 } from '../core/configuration.js'
+import { configuredCliExecutables } from '../core/connections.js'
 import { WrkrsError } from '../core/errors.js'
 import { sortFindings } from '../core/findings.js'
 import { CONFIG_PATH, MANIFEST_PATH, SCHEMA_PATH } from '../core/ownership.js'
@@ -23,7 +24,7 @@ import { err, ok, type Result } from '../core/result.js'
 import { isConnectionIdentifier } from '../core/sanitize.js'
 import type { RepositorySnapshot } from '../core/snapshot.js'
 import { MINIMUM_NODE_VERSION, satisfiesMinimumVersion } from '../core/versions.js'
-import { findExecutable } from '../platform/environment.js'
+import { findPresentExecutables } from '../platform/environment.js'
 import type { GitPort } from '../platform/git.js'
 import { buildInitPlan } from '../planner/init-plan.js'
 import { discoverQuestionSet, type QuestionSet } from './questions.js'
@@ -160,12 +161,18 @@ export function compileCoreComponents(
 export async function connectionEvidence(
   snapshot: RepositorySnapshot,
   ports: InitPorts,
-): Promise<{ projectServers: readonly string[]; cliPresent: boolean }> {
+  connections: ConnectionMap = {},
+): Promise<{
+  projectServers: readonly string[]
+  cliPresent: boolean
+  cliExecutables: ReadonlySet<string>
+}> {
   const projectServers = (snapshot.claude.mcp?.servers.map((server) => server.name) ?? []).filter(
     isConnectionIdentifier,
   )
-  const gh = await findExecutable('gh', ports.environment, ports.fs)
-  return { projectServers, cliPresent: gh !== null }
+  const names = new Set<string>(['gh', ...configuredCliExecutables(Object.values(connections))])
+  const cliExecutables = await findPresentExecutables(names, ports.environment, ports.fs)
+  return { projectServers, cliPresent: cliExecutables.has('gh'), cliExecutables }
 }
 
 async function preflight(
@@ -253,10 +260,10 @@ export async function prepareInit(
       ),
     )
   }
-  const evidence = await connectionEvidence(scanned, ports)
+  const evidence = await connectionEvidence(scanned, ports, config.connections)
   const resolved = resolveConnections(config.connections, dependencies.providers, {
     projectServers: new Set(evidence.projectServers),
-    cliExecutables: new Set(evidence.cliPresent ? ['gh'] : []),
+    cliExecutables: evidence.cliExecutables,
   })
   const roles = compilePortableRoles(roster, config.execution)
   const analysis = adapter.analyze(scanned)

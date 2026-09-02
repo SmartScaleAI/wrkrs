@@ -1,6 +1,7 @@
 import * as nodePath from 'node:path'
 
 import type { EnvironmentPort, FileSystemPort } from '../core/ports.js'
+import { isBareExecutableName } from '../core/sanitize.js'
 
 export function createNodeEnvironment(): EnvironmentPort {
   const isWindows = process.platform === 'win32'
@@ -24,6 +25,7 @@ export async function findExecutable(
   environment: EnvironmentPort,
   fs: FileSystemPort,
 ): Promise<string | null> {
+  if (!isBareExecutableName(name)) return null
   for (const directory of environment.executablePaths) {
     for (const extension of environment.pathExtensions) {
       const candidate = nodePath.join(directory, name + extension)
@@ -34,4 +36,17 @@ export async function findExecutable(
     }
   }
   return null
+}
+
+/** PATH-looks-up each bare executable name without running anything. */
+export async function findPresentExecutables(
+  names: Iterable<string>,
+  environment: EnvironmentPort,
+  fs: FileSystemPort,
+): Promise<ReadonlySet<string>> {
+  const present = new Set<string>()
+  for (const name of names) {
+    if ((await findExecutable(name, environment, fs)) !== null) present.add(name)
+  }
+  return present
 }

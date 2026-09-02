@@ -152,4 +152,53 @@ describe('configuration schema v2 migration through check and update', () => {
     expect(rolled.status === 'rolled-back' || rolled.status === 'rollback-incomplete').toBe(true)
     expect(readFileSync(path.join(root, CONFIG_PATH), 'utf8')).toBe(before)
   })
+
+  it('later update of a migrated configuration keeps comment-preserving bytes', async () => {
+    const { root, ports } = await install()
+    demoteInstalledConfig(root)
+    const migrated = await prepareUpdate(root, createTestDependencies(), ports)
+    if (!migrated.ok) throw migrated.error
+    const applied = await applyPreparedUpdate(migrated.value, createTestDependencies(), ports)
+    expect(applied.status).toBe('applied')
+    const afterMigration = readFileSync(path.join(root, CONFIG_PATH), 'utf8')
+    expect(afterMigration).toContain('# keep-this-comment')
+
+    const later = await prepareUpdate(root, createTestDependencies(), ports)
+    if (!later.ok) throw later.error
+    const operation = later.value.plan.operations.find(
+      (candidate) => candidate.path === CONFIG_PATH,
+    )
+    expect(operation?.outcome).toBe('no-op')
+    const again = await applyPreparedUpdate(later.value, createTestDependencies(), ports)
+    expect(again.status).toBe('applied')
+    expect(readFileSync(path.join(root, CONFIG_PATH), 'utf8')).toBe(afterMigration)
+  })
+
+  it('preserves owner comments added after a comment-preserving migration', async () => {
+    const { root, ports } = await install()
+    demoteInstalledConfig(root)
+    const migrated = await prepareUpdate(root, createTestDependencies(), ports)
+    if (!migrated.ok) throw migrated.error
+    expect(
+      (await applyPreparedUpdate(migrated.value, createTestDependencies(), ports)).status,
+    ).toBe('applied')
+    const file = path.join(root, CONFIG_PATH)
+    writeFileSync(file, `${readFileSync(file, 'utf8')}# owner-note\n`)
+    const customized = readFileSync(file, 'utf8')
+    const later = await prepareUpdate(root, createTestDependencies(), ports)
+    if (!later.ok) throw later.error
+    const operation = later.value.plan.operations.find(
+      (candidate) => candidate.path === CONFIG_PATH,
+    )
+    expect(operation?.outcome).toBe('preserve')
+    expect(
+      later.value.plan.findings.some(
+        (finding) => finding.code === 'UPDATE_CUSTOMIZATION_PRESERVED',
+      ),
+    ).toBe(true)
+    expect((await applyPreparedUpdate(later.value, createTestDependencies(), ports)).status).toBe(
+      'applied',
+    )
+    expect(readFileSync(file, 'utf8')).toBe(customized)
+  })
 })

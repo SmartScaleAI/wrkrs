@@ -99,6 +99,8 @@ describe('Claude Code adapter compile', () => {
     })
     const joined = components.map((component) => component.content).join('\n')
     expect(joined).toContain('fake-tracker')
+    expect(joined).toContain('Existing MCP server supplies work-item-context (verified-project)')
+    expect(joined).toContain('Use the existing MCP server bound for work-item-context.')
     expect(joined).not.toContain('mcpServers')
     expect(joined).not.toMatch(/https?:\/\//)
     expect(joined).not.toContain('allowed-tools')

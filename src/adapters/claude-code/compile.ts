@@ -55,8 +55,16 @@ function describeConnections(resolved: readonly ResolvedBinding[]): {
         : binding.kind === 'cli'
           ? `cli ${binding.executable}`
           : 'manual'
-    lines.push(`- \`${capability}\`: ${binding.provider}, ${target}, ${item.verification}`)
+    const summary = item.guidance.summary
+    lines.push(
+      `- \`${capability}\`: ${binding.provider}, ${target}, ${item.verification}. ${summary}`,
+    )
     summaryParts.push(`${capability} via ${binding.provider} (${item.verification})`)
+    summaryParts.push(summary)
+    for (const instruction of item.guidance.instructions) {
+      lines.push(`  - ${instruction}`)
+      summaryParts.push(instruction)
+    }
   }
   lines.push('')
   lines.push('Reserved mutation capabilities are not bindable and are not listed.')

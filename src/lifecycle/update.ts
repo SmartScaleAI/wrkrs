@@ -2,17 +2,19 @@ import { runCheck } from '../check/check.js'
 import { serializeConfig } from '../config/serialize.js'
 import { migrateConfigDocumentToCurrent } from '../config/migrations/index.js'
 import { CONFIG_SCHEMA_VERSION } from '../core/configuration.js'
+import { configuredCliExecutables } from '../core/connections.js'
 import { WrkrsError } from '../core/errors.js'
 import { createFinding, sortFindings, type Finding } from '../core/findings.js'
 import { CONFIG_PATH, MANIFEST_PATH } from '../core/ownership.js'
 import type { DesiredComponent, InstallPlan } from '../core/plan.js'
 import { resolveConnections } from '../core/provider.js'
-import { isConnectionIdentifier } from '../core/sanitize.js'
 import { err, ok, type Result } from '../core/result.js'
 import type { RosterRecommendation } from '../core/roster.js'
+import { isConnectionIdentifier } from '../core/sanitize.js'
 import { compileCoreComponents, type InitDependencies, type InitPorts } from '../init/init.js'
 import { buildUpdatePlan } from '../planner/lifecycle-plan.js'
-import { findExecutable } from '../platform/environment.js'
+import { findPresentExecutables } from '../platform/environment.js'
+import { sha256 } from '../platform/hash.js'
 import { compilePortableRoles } from '../presets/product-engineering/index.js'
 import { snapshotTargets } from '../repository/analyze.js'
 import { applyPlan, type ApplyResult } from '../writer/transaction.js'
@@ -66,14 +68,19 @@ export async function prepareUpdate(
   }
 
   const roles = compilePortableRoles(roster.value, config.execution)
-  const gh = await findExecutable('gh', ports.environment, ports.fs)
   const projectServers = (
     installation.snapshot.claude.mcp?.servers.map((server) => server.name) ?? []
   ).filter(isConnectionIdentifier)
+  const cliExecutables = await findPresentExecutables(
+    configuredCliExecutables(Object.values(config.connections)),
+    ports.environment,
+    ports.fs,
+  )
   const resolved = resolveConnections(config.connections, dependencies.providers, {
     projectServers: new Set(projectServers),
-    cliExecutables: new Set(gh ? ['gh'] : []),
+    cliExecutables,
   })
+  const configEntry = manifest.entries.find((entry) => entry.path === CONFIG_PATH)
   let configYaml = serializeConfig(config)
   let schemaMigration: true | undefined
   if (
@@ -94,6 +101,14 @@ export async function prepareUpdate(
     }
     configYaml = migrated.value
     schemaMigration = true
+  } else if (
+    installation.configSourceText !== null &&
+    configEntry !== undefined &&
+    sha256(installation.configSourceText) === configEntry.lastAppliedHash
+  ) {
+    // Keep the on-disk bytes, including owner comments and key order. A later
+    // update must not re-serialize an undrifted migrated file.
+    configYaml = installation.configSourceText
   }
   const desired: DesiredComponent[] = [
     ...compileCoreComponents(

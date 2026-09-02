@@ -72,6 +72,44 @@ describe('connection check and answers input', () => {
     expect(missingCli?.path).toContain('source-control-context')
   })
 
+  it('verifies a configured CLI executable other than gh when it is on PATH', async () => {
+    const root = createFixtureRepository('clean-repository', { commit: true })
+    cleanup.push(root)
+    const bin = mkdtempSync(path.join(tmpdir(), 'wrkrs-cli-bin-'))
+    cleanup.push(bin)
+    writeFileSync(path.join(bin, 'hub'), '')
+    const deps = createTestDependencies()
+    const ports = createTestPorts({
+      environment: createTestEnvironment({ executablePaths: [bin], pathExtensions: [''] }),
+    })
+    const prepared = await prepareInit(root, deps, ports, {
+      connections: {
+        'source-control-context': { provider: 'github', kind: 'cli', executable: 'hub' },
+      },
+    })
+    if (!prepared.ok) throw prepared.error
+    expect((await applyPreparedInit(prepared.value, deps, ports)).status).toBe('applied')
+    const report = await runCheck(
+      {
+        cwd: root,
+        wrkrsVersion: deps.wrkrsVersion,
+        adapters: deps.adapters,
+        providers: deps.providers,
+      },
+      ports,
+    )
+    const ok = report.diagnostics.find(
+      (item) =>
+        item.code === 'CONNECTION_OK' &&
+        typeof item.path === 'string' &&
+        item.path.includes('source-control-context'),
+    )
+    expect(ok?.severity).toBe('info')
+    expect(
+      report.diagnostics.find((item) => item.code === 'CONNECTION_CLI_UNAVAILABLE'),
+    ).toBeUndefined()
+  })
+
   it('95: missing, unknown-provider, and unsupported-capability bindings name the exact path', async () => {
     const { root, deps, ports } = await installEmpty()
     const configPath = path.join(root, '.wrkrs', 'config.yaml')

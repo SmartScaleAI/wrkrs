@@ -70,6 +70,19 @@ export interface ResolvedBinding {
   readonly guidance: ProviderGuidance
 }
 
+/** Bare PATH names from `cli` bindings; rejected identifiers are omitted. */
+export function configuredCliExecutables(
+  connections: Iterable<ConnectionBinding | undefined>,
+): readonly string[] {
+  const names: string[] = []
+  for (const binding of connections) {
+    if (binding?.kind === 'cli' && isBareExecutableName(binding.executable)) {
+      names.push(binding.executable)
+    }
+  }
+  return names
+}
+
 export function verifyBinding(
   binding: ConnectionBinding,
   evidence: ConnectionEvidence,

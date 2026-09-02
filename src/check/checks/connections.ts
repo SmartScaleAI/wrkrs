@@ -1,8 +1,9 @@
 import { READ_CAPABILITY_IDS } from '../../core/capabilities.js'
-import { isConnectionIdentifier } from '../../core/sanitize.js'
-import { resolveConnections } from '../../core/provider.js'
+import { configuredCliExecutables } from '../../core/connections.js'
 import type { Diagnostic } from '../../core/diagnostics.js'
-import { findExecutable } from '../../platform/environment.js'
+import { resolveConnections } from '../../core/provider.js'
+import { isConnectionIdentifier } from '../../core/sanitize.js'
+import { findPresentExecutables } from '../../platform/environment.js'
 import type { CheckContext } from '../context.js'
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -26,10 +27,14 @@ export async function checkConnections(context: CheckContext): Promise<Diagnosti
   const config = context.config
   if (!config) return []
   const names = await projectServerNames(context)
-  const gh = await findExecutable('gh', context.environment, context.fs)
+  const cliExecutables = await findPresentExecutables(
+    configuredCliExecutables(Object.values(config.connections)),
+    context.environment,
+    context.fs,
+  )
   const { diagnostics } = resolveConnections(config.connections, context.providers, {
     projectServers: new Set(names),
-    cliExecutables: new Set(gh ? ['gh'] : []),
+    cliExecutables,
   })
   void READ_CAPABILITY_IDS
   return [...diagnostics]
